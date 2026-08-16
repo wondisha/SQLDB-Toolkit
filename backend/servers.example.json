@@ -1,0 +1,24 @@
+[
+  {
+    "id": "prod-primary",
+    "label": "PROD-SQL01 (AG Primary)",
+    "server": "prod-sql01.mycorp.local",
+    "port": 1433,
+    "database": "master",
+    "user": "dashboard_reader",
+    "password": "change-me",
+    "encrypt": true,
+    "trustServerCertificate": false
+  },
+  {
+    "id": "prod-secondary",
+    "label": "PROD-SQL02 (AG Secondary)",
+    "server": "prod-sql02.mycorp.local",
+    "port": 1433,
+    "database": "master",
+    "user": "dashboard_reader",
+    "password": "change-me",
+    "encrypt": true,
+    "trustServerCertificate": false
+  }
+]

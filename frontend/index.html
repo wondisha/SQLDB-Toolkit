@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SQLDB Toolkit — Ops Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◧</span>
+      <div class="brand-text">
+        <span class="brand-title">SQLDB Toolkit</span>
+        <span class="brand-sub">Ops Console</span>
+      </div>
+    </div>
+
+    <div class="topbar-controls">
+      <label class="control">
+        <span class="control-label">Instance</span>
+        <select id="serverSelect"></select>
+      </label>
+      <label class="control" id="databaseControl">
+        <span class="control-label">Database</span>
+        <select id="databaseSelect"></select>
+      </label>
+      <label class="control">
+        <span class="control-label">Auto-refresh</span>
+        <select id="refreshSelect">
+          <option value="0">Off</option>
+          <option value="10">10s</option>
+          <option value="15" selected>15s</option>
+          <option value="30">30s</option>
+          <option value="60">60s</option>
+        </select>
+      </label>
+      <button id="refreshNowBtn" class="btn-refresh" title="Refresh visible panels now">⟳ Refresh</button>
+    </div>
+
+    <div class="conn-status" id="connStatus">
+      <span class="conn-dot" id="connDot"></span>
+      <span id="connLabel">connecting…</span>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="sidebar" id="sidebar">
+      <!-- category nav injected by app.js -->
+    </nav>
+
+    <main class="content" id="content">
+      <!-- panels injected by app.js -->
+    </main>
+  </div>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
