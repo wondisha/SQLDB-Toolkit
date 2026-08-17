@@ -1,67 +1,528 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SQLDB Toolkit — Ops Console</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SQLDB Toolkit — Ops Console</title>
+  
+  <!-- Google Fonts & Chart.js -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    :root {
+      --bg-base: #0f172a;
+      --bg-surface: #1e293b;
+      --bg-surface-hover: #334155;
+      --border-color: #334155;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-faint: #64748b;
+      --accent-primary: #3b82f6;
+      --accent-ok: #22c55e;
+      --accent-warn: #eab308;
+      --accent-crit: #ef4444;
+      --accent-info: #06b6d4;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Top Bar Controls */
+    header {
+      height: 60px;
+      background-color: var(--bg-surface);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-logo {
+      width: 24px;
+      height: 24px;
+      background: var(--accent-primary);
+      border-radius: 4px;
+    }
+
+    .brand-title {
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.025em;
+    }
+
+    .brand-subtitle {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .controls-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .control {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .control-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+    }
+
+    .control input, .control select {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+    }
+
+    .control input:focus, .control select:focus {
+      border-color: var(--accent-primary);
+    }
+
+    .btn {
+      background: var(--accent-primary);
+      color: #fff;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      opacity: 0.9;
+    }
+
+    .btn-danger {
+      background: var(--accent-crit);
+    }
+
+    .btn-warning {
+      background: var(--accent-warn);
+      color: #000;
+    }
+
+    .connection-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      padding-left: 12px;
+      border-left: 1px solid var(--border-color);
+    }
+
+    .conn-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-faint);
+    }
+
+    .conn-dot.ok {
+      background: var(--accent-ok);
+      box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
+    }
+
+    .conn-dot.err {
+      background: var(--accent-crit);
+      box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
+    }
+
+    /* Main Dashboard Layout */
+    .app-body {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Sidebar */
+    aside {
+      width: 280px;
+      background-color: var(--bg-surface);
+      border-right: 1px solid var(--border-color);
+      overflow-y: auto;
+      padding: 16px 12px;
+    }
+
+    .nav-group-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+      padding-left: 8px;
+    }
+
+    .nav-item {
+      padding: 10px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-bottom: 4px;
+      transition: background 0.15s ease;
+    }
+
+    .nav-item:hover {
+      background-color: var(--bg-surface-hover);
+    }
+
+    .nav-item.active {
+      background-color: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    .nav-item-label {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text-main);
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    .nav-item-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.3;
+    }
+
+    /* Workspace Content */
+    main {
+      flex: 1;
+      background-color: var(--bg-base);
+      overflow-y: auto;
+      padding: 24px;
+    }
+
+    .content-header {
+      margin-bottom: 20px;
+    }
+
+    .content-title {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .content-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Panels & Tables */
+    .panel {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0, 0, 0, 0.1);
+    }
+
+    .panel-eyebrow {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-muted);
+      display: block;
+      margin-bottom: 2px;
+    }
+
+    .panel-title {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .panel-meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+    }
+
+    .elapsed {
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text-muted);
+    }
+
+    .panel-run-btn {
+      background: none;
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .panel-run-btn:hover {
+      background: var(--bg-surface-hover);
+    }
+
+    .scope-hint {
+      padding: 8px 16px;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: rgba(0, 0, 0, 0.2);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .panel-body {
+      padding: 0;
+      overflow-x: auto;
+    }
+
+    .panel-empty, .panel-loading, .panel-error {
+      padding: 24px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .panel-error {
+      color: var(--accent-crit);
+    }
+
+    /* Data Tables */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .data-table th, .data-table td {
+      padding: 10px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .data-table th {
+      background: rgba(0, 0, 0, 0.2);
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.05em;
+    }
+
+    .data-table tr:hover td {
+      background: rgba(255, 255, 255, 0.015);
+    }
+
+    .data-table td.num {
+      text-align: right;
+    }
+
+    .action-cell {
+      display: flex;
+      gap: 6px;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-ok { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+    .badge-crit { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    .badge-warn { background: rgba(234, 179, 8, 0.2); color: #facc15; }
+    .badge-info { background: rgba(6, 182, 212, 0.2); color: #22d3ee; }
+    .badge-neutral { background: rgba(100, 116, 139, 0.2); color: #94a3b8; }
+
+    /* Wait Bars Widget */
+    .waitbar-list {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .waitbar-row {
+      display: grid;
+      grid-template-columns: 200px 1fr 60px;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+    }
+
+    .waitbar-type {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .waitbar-track {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      height: 8px;
+      overflow: hidden;
+    }
+
+    .waitbar-fill {
+      height: 100%;
+      border-radius: 4px;
+    }
+
+    .waitbar-pct {
+      font-family: 'JetBrains Mono', monospace;
+      text-align: right;
+      color: var(--text-muted);
+    }
+
+    /* Blocking Tree Widget */
+    .blocktree {
+      padding: 16px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+    }
+
+    .blocktree-root {
+      margin-bottom: 12px;
+    }
+
+    .blocktree-node {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(239, 68, 68, 0.08);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      padding: 8px 12px;
+      border-radius: 6px;
+    }
+
+    .blocktree-node .sid {
+      font-weight: 600;
+      color: var(--accent-crit);
+    }
+
+    .blocktree-node .meta {
+      color: var(--text-muted);
+    }
+
+    .blocktree-child {
+      margin-left: 24px;
+      margin-top: 6px;
+      border-left: 2px solid var(--border-color);
+      padding-left: 16px;
+    }
+  </style>
 </head>
 <body>
 
-<div class="app">
-
-  <header class="topbar">
+  <!-- Top Navigation Control Bar -->
+  <header>
     <div class="brand">
-      <span class="brand-mark">◧</span>
-      <div class="brand-text">
-        <span class="brand-title">SQLDB Toolkit</span>
-        <span class="brand-sub">Ops Console</span>
+      <div class="brand-logo"></div>
+      <div>
+        <div class="brand-title">SQLDB Toolkit</div>
+        <div class="brand-subtitle">Ops Console</div>
       </div>
     </div>
 
-    <div class="topbar-controls">
+    <div class="controls-bar">
+      <!-- Instance Input allowing custom naming & typing -->
       <label class="control">
         <span class="control-label">Instance</span>
-        <select id="serverSelect"></select>
+        <input type="text" id="serverSelect" style="width: 180px;" />
       </label>
-      <label class="control" id="databaseControl">
+
+      <!-- Database Selector -->
+      <label class="control" id="databaseControl" style="display: none;">
         <span class="control-label">Database</span>
-        <select id="databaseSelect"></select>
+        <select id="databaseSelect" style="width: 150px;">
+          <option value="">(unavailable)</option>
+        </select>
       </label>
+
+      <!-- Auto-Refresh Selector -->
       <label class="control">
-        <span class="control-label">Auto-refresh</span>
-        <select id="refreshSelect">
+        <span class="control-label">Auto-Refresh</span>
+        <select id="refreshSelect" style="width: 90px;">
           <option value="0">Off</option>
-          <option value="10">10s</option>
+          <option value="5">5s</option>
           <option value="15" selected>15s</option>
           <option value="30">30s</option>
           <option value="60">60s</option>
         </select>
       </label>
-      <button id="refreshNowBtn" class="btn-refresh" title="Refresh visible panels now">⟳ Refresh</button>
-    </div>
 
-    <div class="conn-status" id="connStatus">
-      <span class="conn-dot" id="connDot"></span>
-      <span id="connLabel">connecting…</span>
+      <button class="btn" id="refreshNowBtn" type="button">Refresh</button>
+
+      <div class="connection-status">
+        <div class="conn-dot" id="connDot"></div>
+        <span id="connLabel">connecting…</span>
+      </div>
     </div>
   </header>
 
-  <div class="body">
-    <nav class="sidebar" id="sidebar">
-      <!-- category nav injected by app.js -->
-    </nav>
+  <!-- Main Application Body -->
+  <div class="app-body">
+    <!-- Category Navigation Sidebar -->
+    <aside id="sidebar"></aside>
 
-    <main class="content" id="content">
-      <!-- panels injected by app.js -->
+    <!-- Content Workspace Area -->
+    <main id="content">
+      <div class="panel">
+        <div class="panel-loading">Initializing console…</div>
+      </div>
     </main>
   </div>
 
-</div>
-
-<script src="app.js"></script>
+  <!-- App Frontend Logic -->
+  <script src="app.js"></script>
 </body>
 </html>

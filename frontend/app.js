@@ -9,7 +9,7 @@ const state = {
   serverId: null,
   database: null,
   refreshSeconds: 15,
-  timers: [], // interval ids for the currently rendered panels
+  timers: [],
 };
 
 const els = {
@@ -24,6 +24,8 @@ const els = {
   connLabel: document.getElementById('connLabel'),
 };
 
+let currentChart = null;
+
 // ---------------------------------------------------------------- bootstrap
 
 async function init() {
@@ -36,7 +38,7 @@ async function init() {
     state.servers = servers;
 
     if (servers.length === 0) {
-      renderFatal('No servers configured. Add backend/servers.json or backend/.env, then restart the API.');
+      renderFatal('No servers configured.');
       return;
     }
 
@@ -44,14 +46,13 @@ async function init() {
     renderSidebar();
 
     state.serverId = servers[0].id;
-    state.database = servers[0].defaultDatabase || null;
-    els.serverSelect.value = state.serverId;
+    state.database = servers[0].database || servers[0].defaultDatabase || null;
 
     await onServerChanged();
     setActiveCategory(catalog[0].id);
     testConnection();
   } catch (err) {
-    renderFatal(`Could not reach the dashboard API at ${API_BASE}. Is backend/src/server.js running? (${err.message})`);
+    renderFatal(`Could not reach dashboard API at ${API_BASE}. (${err.message})`);
   }
 }
 
@@ -63,19 +64,39 @@ function renderFatal(message) {
 // ---------------------------------------------------------------- top controls
 
 function renderServerSelect() {
-  els.serverSelect.innerHTML = state.servers
-    .map((s) => `<option value="${s.id}">${escapeHtml(s.label)}</option>`)
-    .join('');
+  if (els.serverSelect.tagName === 'INPUT') {
+    if (state.servers.length > 0 && !els.serverSelect.value) {
+      els.serverSelect.value = state.servers[0].label || state.servers[0].name || state.servers[0].id;
+      state.serverId = state.servers[0].id;
+    }
+  } else {
+    els.serverSelect.innerHTML = state.servers
+      .map((s) => `<option value="${s.id}">${escapeHtml(s.label || s.name || s.id)}</option>`)
+      .join('');
+    if (state.servers.length > 0) {
+      state.serverId = state.servers[0].id;
+      els.serverSelect.value = state.serverId;
+    }
+  }
 }
 
-els.serverSelect.addEventListener('change', async () => {
-  state.serverId = els.serverSelect.value;
-  const srv = state.servers.find((s) => s.id === state.serverId);
-  state.database = srv ? srv.defaultDatabase : null;
-  await onServerChanged();
-  testConnection();
-  renderActivePanels();
-});
+if (els.serverSelect.tagName === 'INPUT') {
+  els.serverSelect.addEventListener('input', async (e) => {
+    state.serverId = e.target.value.trim();
+    await onServerChanged();
+    testConnection();
+    renderActivePanels();
+  });
+} else {
+  els.serverSelect.addEventListener('change', async () => {
+    state.serverId = els.serverSelect.value;
+    const srv = state.servers.find((s) => s.id === state.serverId);
+    state.database = srv ? (srv.database || srv.defaultDatabase) : null;
+    await onServerChanged();
+    testConnection();
+    renderActivePanels();
+  });
+}
 
 els.databaseSelect.addEventListener('change', () => {
   state.database = els.databaseSelect.value;
@@ -163,10 +184,21 @@ function renderActivePanels() {
   const cat = state.catalog.find((c) => c.id === state.activeCategory);
   if (!cat) return;
 
-  const needsDb = cat.queries.some((q) => q.scope === 'database');
-  els.databaseControl.style.display = needsDb ? 'flex' : 'none';
+  els.databaseControl.style.display = 'flex';
+
+  const chartSection = document.getElementById('chart-section');
+  if (chartSection) chartSection.style.display = 'none';
+  if (currentChart) {
+    currentChart.destroy();
+    currentChart = null;
+  }
 
   els.content.innerHTML = `
+    <section id="chart-section" style="display: none; margin-bottom: 24px;">
+      <div style="max-width: 800px; height: 320px; background: rgba(255, 255, 255, 0.02); padding: 16px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08);">
+        <canvas id="queryChart"></canvas>
+      </div>
+    </section>
     <div class="content-header">
       <div class="content-title">${escapeHtml(cat.label)}</div>
       <div class="content-desc">${escapeHtml(cat.description)}</div>
@@ -174,6 +206,11 @@ function renderActivePanels() {
     <div id="panelStack"></div>
   `;
   const stack = document.getElementById('panelStack');
+
+  if (!cat.queries || cat.queries.length === 0) {
+    stack.innerHTML = '<div class="panel"><div class="panel-empty">No queries defined for this category yet.</div></div>';
+    return;
+  }
 
   cat.queries.forEach((q) => {
     const panelEl = document.createElement('div');
@@ -198,7 +235,7 @@ function panelShell(q) {
   return `
     <div class="panel-header">
       <div class="panel-heading">
-        <span class="panel-eyebrow">${escapeHtml(q.script)}</span>
+        <span class="panel-eyebrow">${escapeHtml(q.script || '')}</span>
         <span class="panel-title">${escapeHtml(q.label)}</span>
       </div>
       <div class="panel-meta">
@@ -207,7 +244,7 @@ function panelShell(q) {
         <button class="panel-run-btn" type="button">run</button>
       </div>
     </div>
-    ${q.scope === 'database' ? `<div class="scope-hint">runs against database: <strong>${escapeHtml(state.database || '(none selected)')}</strong></div>` : ''}
+    <div class="scope-hint">targeting database: <strong>${escapeHtml(state.database || '(none selected)')}</strong></div>
     <div class="panel-body" data-role="body">
       <div class="panel-loading">loading…</div>
     </div>
@@ -218,26 +255,97 @@ async function loadPanel(categoryId, q, panelEl) {
   const bodyEl = panelEl.querySelector('[data-role="body"]');
   const elapsedEl = panelEl.querySelector('[data-role="elapsed"]');
 
-  if (q.scope === 'database' && !state.database) {
+  if (!state.database) {
     bodyEl.innerHTML = '<div class="panel-empty">Select a database above to run this panel.</div>';
     return;
   }
 
-  const params = new URLSearchParams({ server: state.serverId });
-  if (q.scope === 'database') params.set('database', state.database);
+  const params = new URLSearchParams({ server: state.serverId, database: state.database });
 
   try {
     const data = await fetchJSON(`/api/query/${categoryId}/${q.id}?${params.toString()}`);
-    elapsedEl.textContent = `${data.elapsedMs} ms`;
+    elapsedEl.textContent = `${data.elapsedMs || 0} ms`;
     bodyEl.innerHTML = '';
-    data.recordsets.forEach((rs) => bodyEl.appendChild(renderRecordset(q.id, rs.rows)));
-    if (data.recordsets.every((rs) => rs.rows.length === 0)) {
+
+    const firstRows = data.recordsets && data.recordsets[0] ? data.recordsets[0] : [];
+
+    if (q.chartConfig && firstRows.length > 0 && typeof Chart !== 'undefined') {
+      renderChart(firstRows, q.chartConfig);
+    }
+
+    if (data.recordsets) {
+      data.recordsets.forEach((rs) => bodyEl.appendChild(renderRecordset(q, rs)));
+    } else if (data.rows) {
+      bodyEl.appendChild(renderRecordset(q, data.rows));
+    }
+
+    const totalRows = data.recordsets ? data.recordsets.reduce((acc, rs) => acc + rs.length, 0) : (data.rows ? data.rows.length : 0);
+    if (totalRows === 0) {
       bodyEl.innerHTML = '<div class="panel-empty">No rows returned — nothing to report right now.</div>';
     }
   } catch (err) {
     bodyEl.innerHTML = `<div class="panel-error">${escapeHtml(err.message)}</div>`;
     elapsedEl.textContent = '';
   }
+}
+
+// ---------------------------------------------------------------- Chart.js integration
+
+function renderChart(data, chartConfig) {
+  const chartSection = document.getElementById('chart-section');
+  const canvas = document.getElementById('queryChart');
+  if (!chartSection || !canvas) return;
+
+  if (!chartConfig || !data || data.length === 0) {
+    chartSection.style.display = 'none';
+    if (currentChart) {
+      currentChart.destroy();
+      currentChart = null;
+    }
+    return;
+  }
+
+  chartSection.style.display = 'block';
+
+  if (currentChart) {
+    currentChart.destroy();
+  }
+
+  const ctx = canvas.getContext('2d');
+  const xAxisKey = chartConfig.xAxisKey || chartConfig.nameKey;
+  const yAxisKey = chartConfig.yAxisKey || chartConfig.dataKey;
+
+  const labels = data.map((item) => item[xAxisKey] ?? 'N/A');
+  const values = data.map((item) => item[yAxisKey] ?? 0);
+
+  const defaultColors = [
+    '#3182ce', '#dd6b20', '#38a169', '#e53e3e', '#805ad5',
+    '#d69e2e', '#319795', '#b83280', '#4a5568', '#00b5d8'
+  ];
+
+  const isPie = chartConfig.type === 'pie';
+
+  currentChart = new Chart(ctx, {
+    type: isPie ? 'pie' : 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: chartConfig.label || 'Value',
+        data: values,
+        backgroundColor: isPie ? defaultColors : '#3182ce',
+        borderColor: isPie ? '#1a202c' : '#2b6cb0',
+        borderWidth: 1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: isPie, position: 'bottom' }
+      },
+      scales: isPie ? {} : { y: { beginAtZero: true } }
+    }
+  });
 }
 
 // ---------------------------------------------------------------- rendering: recordsets
@@ -257,35 +365,39 @@ function badgeClassFor(col, value) {
   return 'badge-neutral';
 }
 
-function renderRecordset(queryId, rows) {
+function renderRecordset(queryConfig, rows) {
   if (!rows || rows.length === 0) {
-    const empty = document.createElement('div');
-    return empty; // parent shows the "no rows" message once, across recordsets
+    return document.createElement('div');
   }
 
+  const queryId = queryConfig.id;
   if (queryId === 'wait-profile' || queryId === 'wait-stats-snapshot') {
     return renderWaitBars(rows);
   }
   if (queryId === 'active-blockers' || queryId === 'current-blocking-chains') {
     return renderBlockingTree(rows);
   }
-  return renderTable(rows);
+  return renderTable(rows, queryConfig.actions);
 }
 
-function renderTable(rows) {
-  const cols = Object.keys(rows[0]);
+function renderTable(rows, actions) {
+  const cols = Object.keys(rows[0] || {});
   const wrap = document.createElement('div');
   const table = document.createElement('table');
   table.className = 'data-table';
 
   const thead = document.createElement('thead');
-  thead.innerHTML = `<tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
+  let headHtml = `<tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}`;
+  if (actions && actions.length > 0) headHtml += '<th>Actions</th>';
+  headHtml += '</tr>';
+  thead.innerHTML = headHtml;
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
   rows.forEach((row) => {
     const tr = document.createElement('tr');
-    tr.innerHTML = cols
+    
+    let rowHtml = cols
       .map((c) => {
         const val = row[c];
         if (STATUS_COLUMNS.has(c) && val !== null && val !== undefined && val !== '') {
@@ -295,11 +407,72 @@ function renderTable(rows) {
         return `<td class="${isNum ? 'num' : ''}">${formatCell(val)}</td>`;
       })
       .join('');
+
+    tr.innerHTML = rowHtml;
+
+    if (actions && actions.length > 0) {
+      const actionTd = document.createElement('td');
+      actionTd.className = 'action-cell';
+
+      actions.forEach((action) => {
+        const paramKey = action.paramKeys ? action.paramKeys['sql'] : null;
+        const fixValue = paramKey ? row[paramKey] : true;
+
+        if (fixValue !== null && fixValue !== undefined && fixValue !== '' && fixValue !== '—') {
+          const btn = document.createElement('button');
+          btn.textContent = action.label;
+          btn.className = `btn btn-${action.variant || 'primary'}`;
+          btn.addEventListener('click', () => handleActionClick(action, row));
+          actionTd.appendChild(btn);
+        }
+      });
+
+      tr.appendChild(actionTd);
+    }
+
     tbody.appendChild(tr);
   });
+
   table.appendChild(tbody);
   wrap.appendChild(table);
   return wrap;
+}
+
+async function handleActionClick(action, row) {
+  let promptMsg = action.confirmPrompt || 'Are you sure you want to execute this action?';
+
+  Object.keys(row).forEach((key) => {
+    promptMsg = promptMsg.replace(new RegExp(`\\{${key}\\}`, 'g'), row[key]);
+  });
+
+  if (!confirm(promptMsg)) return;
+
+  const payload = { server: state.serverId };
+  if (state.database) payload.database = state.database;
+
+  if (action.paramKeys) {
+    Object.entries(action.paramKeys).forEach(([param, rowKey]) => {
+      payload[param] = row[rowKey];
+    });
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}${action.endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await res.json();
+    if (res.ok) {
+      alert(result.message || 'Action executed successfully.');
+      renderActivePanels();
+    } else {
+      alert('Action failed: ' + (result.error || result.message || 'Unknown error'));
+    }
+  } catch (err) {
+    alert('Network/Server error: ' + err.message);
+  }
 }
 
 function formatCell(val) {
@@ -312,7 +485,6 @@ function formatCell(val) {
   return escapeHtml(String(val));
 }
 
-// Signature element #1: wait stats as ranked horizontal bars
 function waitColor(waitType) {
   const t = (waitType || '').toUpperCase();
   if (t.startsWith('LCK_') || t.includes('LATCH')) return 'var(--accent-crit)';
@@ -340,7 +512,6 @@ function renderWaitBars(rows) {
   return wrap;
 }
 
-// Signature element #2: blocking chains as an indented tree (lead blocker -> victims)
 function renderBlockingTree(rows) {
   const bySession = new Map(rows.map((r) => [r.session_id, r]));
   const childrenOf = new Map();
@@ -351,9 +522,7 @@ function renderBlockingTree(rows) {
     }
   });
 
-  // Roots: sessions that block someone but aren't themselves blocked (lead blockers).
   const roots = rows.filter((r) => (!r.blocking_session_id || r.blocking_session_id === 0) && childrenOf.has(r.session_id));
-  // Sessions blocking others while also being blocked (chain links) still show up as children.
   const rootIds = new Set(roots.map((r) => r.session_id));
   const orphanBlockers = [...childrenOf.keys()].filter((sid) => !rootIds.has(sid) && !bySession.has(sid));
 
@@ -398,7 +567,6 @@ function renderBlockingTree(rows) {
     wrap.appendChild(rootEl);
   });
 
-  // Head blockers that show up only as a blocking_session_id (not their own row, e.g. an idle SPID)
   orphanBlockers.forEach((sid) => {
     const rootEl = document.createElement('div');
     rootEl.className = 'blocktree-root';
