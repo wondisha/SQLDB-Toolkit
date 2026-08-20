@@ -29,3 +29,7 @@ Thumbs.db
 
 # Runtime/generated data
 audit_log.json
+# local secrets
+.env
+.env.*
+!.env.example
