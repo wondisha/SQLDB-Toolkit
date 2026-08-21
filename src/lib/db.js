@@ -3,7 +3,7 @@ const sql = require('mssql');
 const DEFAULT_CONNECTION_TIMEOUT_MS = 5000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 
-let poolPromise = null;
+const poolPromises = new Map();
 
 function readTimeout(value, fallback) {
     const parsed = Number.parseInt(value, 10);
@@ -19,7 +19,7 @@ function getDbConfig(env = process.env) {
         connectionTimeout: readTimeout(env.DB_CONNECTION_TIMEOUT_MS, DEFAULT_CONNECTION_TIMEOUT_MS),
         requestTimeout: readTimeout(env.DB_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS),
         options: {
-            encrypt: env.DB_ENCRYPT === 'true' || false,
+            encrypt: env.DB_ENCRYPT === 'true',
             trustServerCertificate: env.DB_TRUST_SERVER_CERTIFICATE !== 'false'
         }
     };
@@ -32,30 +32,60 @@ function getConnectionInfo(config = getDbConfig()) {
     };
 }
 
-async function getPool() {
-    if (!poolPromise) {
-        const pool = new sql.ConnectionPool(getDbConfig());
-        poolPromise = pool.connect().catch((err) => {
-            poolPromise = null;
+function getPoolCacheKey(config) {
+    return JSON.stringify({
+        server: config.server,
+        database: config.database,
+        user: config.user,
+        password: config.password,
+        encrypt: config.options && config.options.encrypt,
+        trustServerCertificate: config.options && config.options.trustServerCertificate
+    });
+}
+
+function buildDbConfig(overrides = {}) {
+    const baseConfig = getDbConfig();
+    return {
+        ...baseConfig,
+        ...overrides,
+        options: {
+            ...baseConfig.options,
+            ...(overrides.options || {})
+        }
+    };
+}
+
+async function getPool(overrides = {}) {
+    const config = buildDbConfig(overrides);
+    const cacheKey = getPoolCacheKey(config);
+
+    if (!poolPromises.has(cacheKey)) {
+        const pool = new sql.ConnectionPool(config);
+        const connectionPromise = pool.connect().catch((err) => {
+            poolPromises.delete(cacheKey);
             throw err;
         });
+
+        poolPromises.set(cacheKey, connectionPromise);
     }
 
-    return poolPromise;
+    return poolPromises.get(cacheKey);
 }
 
 async function closePool() {
-    if (!poolPromise) {
+    if (poolPromises.size === 0) {
         return;
     }
 
-    const activePool = poolPromise;
-    poolPromise = null;
+    const activePools = Array.from(poolPromises.values());
+    poolPromises.clear();
 
-    try {
-        const pool = await activePool;
-        await pool.close();
-    } catch (_) {}
+    await Promise.all(activePools.map(async (activePool) => {
+        try {
+            const pool = await activePool;
+            await pool.close();
+        } catch (_) {}
+    }));
 }
 
 function classifyDbError(err) {
@@ -116,9 +146,9 @@ function createNormalizedDbError(err) {
     return wrapped;
 }
 
-async function runDbOperation(operation) {
+async function runDbOperation(operation, options = {}) {
     try {
-        const pool = await getPool();
+        const pool = await getPool(options.database ? { database: options.database } : {});
         return await operation(pool);
     } catch (err) {
         throw createNormalizedDbError(err);
@@ -129,17 +159,16 @@ function escapeSqlIdentifier(value) {
     return `[${String(value || '').replace(/]/g, ']]')}]`;
 }
 
-function escapeSqlLiteral(value) {
-    return `'${String(value || '').replace(/'/g, "''")}'`;
-}
+async function withRequest(operation, options = {}) {
+    return runDbOperation((pool) => {
+        const request = pool.request();
 
-async function runQuery(queryText, options = {}) {
-    const database = options.database;
-    const sqlText = database
-        ? `USE ${escapeSqlIdentifier(database)};\n${queryText}`
-        : queryText;
+        Object.entries(options.inputs || {}).forEach(([name, value]) => {
+            request.input(name, value);
+        });
 
-    return runDbOperation((pool) => pool.request().batch(sqlText));
+        return operation(request);
+    }, options);
 }
 
 module.exports = {
@@ -149,10 +178,9 @@ module.exports = {
     closePool,
     createNormalizedDbError,
     escapeSqlIdentifier,
-    escapeSqlLiteral,
     getConnectionInfo,
     getDbConfig,
     getPool,
     runDbOperation,
-    runQuery
+    withRequest
 };

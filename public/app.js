@@ -642,6 +642,9 @@ async function fetchJSON(path, options) {
     err.details = body && body.details ? body.details : null;
     throw err;
   }
+  if (!body) {
+    throw new Error('Invalid server response.');
+  }
   return body;
 }
 

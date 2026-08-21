@@ -40,7 +40,9 @@ async function fetchJson(server, route) {
 
 test('GET /api/health/db returns success payload shape', async (t) => {
     const server = await startApp({
-        runQuery: async () => ({ recordset: [{ status: 1 }] })
+        withRequest: async (operation) => operation({
+            query: async () => ({ recordset: [{ status: 1 }] })
+        })
     });
     t.after(() => server.close());
 
@@ -56,11 +58,13 @@ test('GET /api/health/db returns success payload shape', async (t) => {
 
 test('GET /api/health/db returns normalized failure payload shape', async (t) => {
     const server = await startApp({
-        runQuery: async () => {
-            const err = new Error("Login failed for user 'sa'.");
-            err.number = 18456;
-            throw err;
-        }
+        withRequest: async (operation) => operation({
+            query: async () => {
+                const err = new Error("Login failed for user 'sa'.");
+                err.number = 18456;
+                throw err;
+            }
+        })
     });
     t.after(() => server.close());
 
