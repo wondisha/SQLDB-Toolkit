@@ -22,9 +22,26 @@ SQL Agent jobs, or repairs SIDs is included — those stay manual, on purpose.
 ## 1. Set up the backend
 
 ```bash
-cd backend
 npm install
 cp .env.example .env   # then edit .env with your instance details
+```
+
+Required `.env` values:
+
+```env
+DB_SERVER=localhost
+DB_NAME=master
+DB_USER=sa
+DB_PASSWORD=CHANGE_ME
+DB_ENCRYPT=false
+PORT=4000
+```
+
+Optional timeout tuning:
+
+```env
+DB_CONNECTION_TIMEOUT_MS=5000
+DB_REQUEST_TIMEOUT_MS=15000
 ```
 
 **One instance:** just fill in `.env`.
@@ -45,6 +62,38 @@ npm start
 ```
 
 It listens on `http://localhost:4000` by default (change `PORT` in `.env`).
+
+### Database health endpoint
+
+Use `GET /api/health/db` for a lightweight SQL connectivity probe (`SELECT 1`).
+
+Success:
+
+```json
+{
+  "ok": true,
+  "server": "localhost",
+  "database": "master",
+  "checkedAt": "2026-08-21T02:44:26.412Z",
+  "latencyMs": 18
+}
+```
+
+Failure:
+
+```json
+{
+  "ok": false,
+  "code": "AUTH_FAILED",
+  "message": "Authentication failed. Check DB_USER/DB_PASSWORD.",
+  "checkedAt": "2026-08-21T02:44:26.412Z",
+  "details": {
+    "server": "localhost",
+    "database": "master"
+  },
+  "traceId": "4ed507e2-b1f3-4281-a854-7e06e2557afe"
+}
+```
 
 ## 2. Open the frontend
 
@@ -84,7 +133,30 @@ else reads server-scoped DMVs and works regardless of which database the connect
 
 - Auto-refresh interval is set globally in the top bar (default 15s); each panel also has a
   manual **run** button.
+- SQL-backed API failures now return a normalized payload shape:
+
+  ```json
+  { "ok": false, "code": "AUTH_FAILED", "message": "Authentication failed. Check DB_USER/DB_PASSWORD.", "traceId": "..." }
+  ```
+
 - The wait-stats and blocking-chain panels get a custom visual (ranked bars / indented tree);
   everything else renders as a sortable-by-eye table with color-coded status badges.
 - The deadlock report and AG error panels depend on the `system_health` Extended Events session
   being enabled (it is, by default, on SQL Server 2016+).
+
+## Troubleshooting
+
+| Error code | Meaning | Recommended action |
+|---|---|---|
+| `AUTH_FAILED` | SQL Server rejected the configured login. | Verify `DB_USER` and `DB_PASSWORD`, then restart the API. |
+| `DB_UNREACHABLE` | The SQL Server host or service could not be reached. | Check `DB_SERVER`, SQL Server availability, port exposure, and SQL Browser/service state. |
+| `TIMEOUT` | The connection attempt or query exceeded the configured timeout. | Verify network/firewall rules and increase `DB_CONNECTION_TIMEOUT_MS` or `DB_REQUEST_TIMEOUT_MS` if needed. |
+| `UNKNOWN_DB_ERROR` | The request failed, but not with a recognized auth/network/timeout signature. | Use the returned `traceId` and server logs to inspect the underlying SQL error. |
+
+## Local verification
+
+```bash
+npm test
+npm start
+# open http://localhost:4000 and use Refresh to verify the connection banner, DB dropdown, and health panels
+```

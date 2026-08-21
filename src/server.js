@@ -1,14 +1,10 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
-const sql = require('mssql');
 const fs = require('fs');
 const path = require('path');
+const defaultDb = require('./lib/db');
 require('dotenv').config();
-
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.static('public'));
 
 const auditLogPath = path.join(process.cwd(), 'audit_log.json');
 
@@ -37,26 +33,37 @@ function logAuditEvent(actionName, targetDb, details) {
     } catch (e) {}
 }
 
-// Database configuration using environment variables
-const dbConfig = {
-    server: process.env.DB_SERVER || 'localhost',
-    database: process.env.DB_NAME || 'AdventureWorksLT',
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    options: {
-        encrypt: process.env.DB_ENCRYPT === 'true' || false,
-        trustServerCertificate: true
-    }
-};
-
-// Global pool connection
-let poolConnection;
-async function getPool() {
-    if (!poolConnection) {
-        poolConnection = await sql.connect(dbConfig);
-    }
-    return poolConnection;
+function createTraceId() {
+    return crypto.randomUUID();
 }
+
+function sendDbError(res, logger, db, err, context, options = {}) {
+    const normalized = db.createNormalizedDbError
+        ? db.createNormalizedDbError(err)
+        : err;
+    const traceId = createTraceId();
+    const rawError = normalized && normalized.cause ? normalized.cause : err;
+
+    logger.error(`[${traceId}] ${context}`, rawError);
+
+    const body = {
+        ok: false,
+        code: normalized.code || 'UNKNOWN_DB_ERROR',
+        message: normalized.message || 'Database request failed.',
+        traceId,
+        ...options.body
+    };
+
+    return res.status(options.status || 500).json(body);
+}
+
+function createApp({ db = defaultDb, logger = console } = {}) {
+    const app = express();
+    const dbConfig = db.getDbConfig();
+
+    app.use(cors());
+    app.use(express.json());
+    app.use(express.static(path.join(process.cwd(), 'public')));
 
 // ==========================================
 // CONFIGURATION & CATALOG ENDPOINTS
@@ -64,30 +71,28 @@ async function getPool() {
 app.get('/api/servers', (req, res) => {
     res.json([
         {
-            id: process.env.DB_SERVER || 'localhost',
-            name: process.env.DB_SERVER || 'localhost',
-            database: process.env.DB_NAME || 'AdventureWorksLT'
+            id: dbConfig.server,
+            name: dbConfig.server,
+            database: dbConfig.database
         }
     ]);
 });
 
 app.get('/api/servers/:serverId/databases', async (req, res) => {
     try {
-        const pool = await getPool();
-        const result = await pool.request().query("SELECT name FROM sys.databases WHERE state_desc = 'ONLINE'");
+        const result = await db.runQuery("SELECT name FROM sys.databases WHERE state_desc = 'ONLINE'");
         res.json(result.recordset);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendDbError(res, logger, db, err, 'Failed to load database list');
     }
 });
 
 app.get('/api/servers/:serverId/test', async (req, res) => {
     try {
-        const pool = await getPool();
-        await pool.request().query('SELECT 1 AS status');
-        res.json({ success: true });
+        await db.runQuery('SELECT 1 AS status');
+        res.json({ ok: true, success: true });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendDbError(res, logger, db, err, 'Failed to test database connection');
     }
 });
 
@@ -259,11 +264,35 @@ app.get('/api/catalog', (req, res) => {
 // ==========================================
 app.get('/api/health', async (req, res) => {
     try {
-        const pool = await getPool();
-        const result = await pool.request().query('SELECT @@VERSION AS sql_version');
-        res.json({ success: true, version: result.recordset[0].sql_version });
+        const result = await db.runQuery('SELECT @@VERSION AS sql_version');
+        res.json({ ok: true, success: true, version: result.recordset[0].sql_version });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        sendDbError(res, logger, db, err, 'Failed to load SQL Server health');
+    }
+});
+
+app.get('/api/health/db', async (req, res) => {
+    const startedAt = Date.now();
+    const checkedAt = new Date().toISOString();
+
+    try {
+        await db.runQuery('SELECT 1 AS status');
+        const connection = db.getConnectionInfo(dbConfig);
+        res.json({
+            ok: true,
+            server: connection.server,
+            database: connection.database,
+            checkedAt,
+            latencyMs: Date.now() - startedAt
+        });
+    } catch (err) {
+        const connection = db.getConnectionInfo(dbConfig);
+        sendDbError(res, logger, db, err, 'Failed database health check', {
+            body: {
+                checkedAt,
+                details: connection
+            }
+        });
     }
 });
 
@@ -273,26 +302,22 @@ app.get('/api/health', async (req, res) => {
 app.post('/api/actions/enable-querystore', async (req, res) => {
     const targetDb = req.body.database || dbConfig.database;
     try {
-        const pool = await getPool();
-        const request = pool.request();
-        await request.query(`ALTER DATABASE [${targetDb}] SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE);`);
+        await db.runQuery(`ALTER DATABASE ${db.escapeSqlIdentifier(targetDb)} SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE);`);
         logAuditEvent('ENABLE_QUERY_STORE', targetDb, 'Enabled Query Store successfully via dashboard action.');
-        res.json({ success: true, message: `Query Store successfully enabled on ${targetDb}.` });
+        res.json({ ok: true, success: true, message: `Query Store successfully enabled on ${targetDb}.` });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        sendDbError(res, logger, db, err, 'Failed to enable Query Store');
     }
 });
 
 app.post('/api/actions/disable-autoshrink', async (req, res) => {
     const targetDb = req.body.database || dbConfig.database;
     try {
-        const pool = await getPool();
-        const request = pool.request();
-        await request.query(`ALTER DATABASE [${targetDb}] SET AUTO_SHRINK OFF;`);
+        await db.runQuery(`ALTER DATABASE ${db.escapeSqlIdentifier(targetDb)} SET AUTO_SHRINK OFF;`);
         logAuditEvent('DISABLE_AUTO_SHRINK', targetDb, 'Disabled AUTO_SHRINK successfully via dashboard action.');
-        res.json({ success: true, message: `AUTO_SHRINK disabled on ${targetDb}.` });
+        res.json({ ok: true, success: true, message: `AUTO_SHRINK disabled on ${targetDb}.` });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        sendDbError(res, logger, db, err, 'Failed to disable AUTO_SHRINK');
     }
 });
 
@@ -302,12 +327,8 @@ app.post('/api/actions/disable-autoshrink', async (req, res) => {
 app.get('/api/performance/querystore', async (req, res) => {
     try {
         const targetDb = req.query.database || dbConfig.database;
-        const pool = await getPool();
-        const request = pool.request();
-
-        await request.query(`USE [${targetDb}];`);
-
-        const result = await request.query(`
+        const targetDbLiteral = db.escapeSqlLiteral(targetDb);
+        const result = await db.runQuery(`
             SELECT TOP 20
                 q.query_id,
                 qt.query_sql_text AS query_text,
@@ -316,22 +337,18 @@ app.get('/api/performance/querystore', async (req, res) => {
                 (SUM(rs.avg_cpu_time * rs.count_executions) / SUM(rs.count_executions)) / 1000.0 AS avg_cpu_ms,
                 MAX(rs.max_cpu_time) / 1000.0 AS max_cpu_ms,
                 SUM(rs.avg_logical_io_reads * rs.count_executions) AS total_logical_reads,
-                '${targetDb}' AS database_name
+                ${targetDbLiteral} AS database_name
             FROM sys.query_store_query_text AS qt
             JOIN sys.query_store_query AS q ON qt.query_text_id = q.query_text_id
             JOIN sys.query_store_plan AS p ON q.query_id = p.query_id
             JOIN sys.query_store_runtime_stats AS rs ON p.plan_id = rs.plan_id
             GROUP BY q.query_id, qt.query_sql_text
             ORDER BY total_cpu_ms DESC;
-        `);
+        `, { database: targetDb });
 
-        res.json({ success: true, data: result.recordset });
+        res.json({ ok: true, success: true, data: result.recordset });
     } catch (err) {
-        res.status(500).json({ 
-            success: false, 
-            error: err.message, 
-            hint: "Verify that Query Store is enabled on this database: ALTER DATABASE [YourDBName] SET QUERY_STORE = ON;" 
-        });
+        sendDbError(res, logger, db, err, 'Failed to load Query Store insights');
     }
 });
 
@@ -341,20 +358,14 @@ app.get('/api/performance/querystore', async (req, res) => {
 app.get('/api/query/:categoryId/:queryId', async (req, res) => {
     const { categoryId, queryId } = req.params;
     const targetDb = req.query.database || dbConfig.database;
+    const targetDbLiteral = db.escapeSqlLiteral(targetDb);
     const startTime = Date.now();
 
     try {
-        const pool = await getPool();
-        const request = pool.request();
-
-        if (targetDb && categoryId !== 'remediation-audit-log') {
-            await request.query(`USE [${targetDb}];`);
-        }
-
         let recordset = [];
 
         if (categoryId === 'performance' && (queryId === 'query-store-insights' || queryId === 'querystore')) {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT TOP 20
                     q.query_id,
                     qt.query_sql_text AS query_text,
@@ -363,20 +374,20 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                     (SUM(rs.avg_cpu_time * rs.count_executions) / SUM(rs.count_executions)) / 1000.0 AS avg_cpu_ms,
                     MAX(rs.max_cpu_time) / 1000.0 AS max_cpu_ms,
                     SUM(rs.avg_logical_io_reads * rs.count_executions) AS total_logical_reads,
-                    '${targetDb}' AS database_name
+                    ${targetDbLiteral} AS database_name
                 FROM sys.query_store_query_text AS qt
                 JOIN sys.query_store_query AS q ON qt.query_text_id = q.query_text_id
                 JOIN sys.query_store_plan AS p ON q.query_id = p.query_id
                 JOIN sys.query_store_runtime_stats AS rs ON p.plan_id = rs.plan_id
                 GROUP BY q.query_id, qt.query_sql_text
                 ORDER BY total_cpu_ms DESC;
-            `);
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'health-check' && queryId === 'server-uptime') {
-            const r = await request.query(`SELECT sqlserver_start_time, @@VERSION AS version FROM sys.dm_os_sys_info;`);
+            const r = await db.runQuery(`SELECT sqlserver_start_time, @@VERSION AS version FROM sys.dm_os_sys_info;`, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'health-check' && queryId === 'backup-history') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     d.name AS database_name,
                     MAX(b.backup_finish_date) AS last_backup_date,
@@ -388,12 +399,12 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                     END AS backup_health
                 FROM sys.databases d
                 LEFT JOIN msdb.dbo.backupset b ON d.name = b.database_name AND b.type = 'D'
-                WHERE d.state_desc = 'ONLINE' AND d.name <> 'tempdb' AND d.name = '${targetDb}'
+                WHERE d.state_desc = 'ONLINE' AND d.name <> 'tempdb' AND d.name = ${targetDbLiteral}
                 GROUP BY d.name;
-            `);
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'index-maintenance' && queryId === 'index-fragmentation') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT TOP 25
                     OBJECT_NAME(ips.object_id) AS table_name,
                     i.name AS index_name,
@@ -403,18 +414,18 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                 JOIN sys.indexes i ON ips.object_id = i.object_id AND ips.index_id = i.index_id
                 WHERE ips.avg_fragmentation_in_percent > 10 AND ips.page_count > 50
                 ORDER BY ips.avg_fragmentation_in_percent DESC;
-            `);
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'blocking-deadlocks' && queryId === 'active-blockers') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     session_id, blocking_session_id, wait_type, wait_time, status, cpu_time
                 FROM sys.dm_exec_requests
                 WHERE blocking_session_id <> 0;
-            `);
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'blocking-deadlocks' && queryId === 'long-running-transactions') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     s.session_id,
                     s.login_name,
@@ -425,22 +436,22 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                 JOIN sys.dm_tran_session_transactions st ON t.transaction_id = st.transaction_id
                 JOIN sys.dm_exec_sessions s ON st.session_id = s.session_id
                 JOIN sys.dm_tran_database_transactions dt ON t.transaction_id = dt.transaction_id
-                WHERE db_name(dt.database_id) = '${targetDb}';
-            `);
+                WHERE db_name(dt.database_id) = ${targetDbLiteral};
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'ag-health' && queryId === 'ag-replica-states') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     ar.replica_server_name, ars.role_desc, ars.operational_state_desc, ars.synchronization_health_desc
                 FROM sys.dm_hadr_availability_replica_states ars
                 JOIN sys.availability_replicas ar ON ars.replica_id = ar.replica_id;
-            `);
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'security-audit' && queryId === 'orphan-users') {
-            const r = await request.query(`SELECT name, principal_id, type_desc FROM sys.database_principals WHERE type IN ('S', 'U', 'G') AND sid NOT IN (SELECT sid FROM sys.server_principals);`);
+            const r = await db.runQuery(`SELECT name, principal_id, type_desc FROM sys.database_principals WHERE type IN ('S', 'U', 'G') AND sid NOT IN (SELECT sid FROM sys.server_principals);`, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'best-practices' && queryId === 'db-configurations') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     name,
                     recovery_model_desc,
@@ -459,11 +470,11 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                         ELSE 'HEALTHY: Follows MS Baselines'
                     END AS recommendation
                 FROM sys.databases 
-                WHERE name = '${targetDb}';
-            `);
+                WHERE name = ${targetDbLiteral};
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'best-practices' && queryId === 'compatibility-level') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     name,
                     compatibility_level,
@@ -477,11 +488,11 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                     is_read_committed_snapshot_on,
                     snapshot_isolation_state_desc
                 FROM sys.databases 
-                WHERE name = '${targetDb}';
-            `);
+                WHERE name = ${targetDbLiteral};
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'best-practices' && queryId === 'isolation-levels') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     name AS database_name,
                     is_read_committed_snapshot_on AS rcsi_enabled,
@@ -491,11 +502,11 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                         ELSE 'INFO: RCSI is Disabled (Standard locking behavior)'
                     END AS concurrency_recommendation
                 FROM sys.databases 
-                WHERE name = '${targetDb}';
-            `);
+                WHERE name = ${targetDbLiteral};
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'best-practices' && queryId === 'file-growth-config') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     f.name AS logical_file_name,
                     f.type_desc AS file_type,
@@ -516,10 +527,10 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                     END AS storage_recommendation,
                     f.physical_name
                 FROM sys.database_files f;
-            `);
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'best-practices' && queryId === 'tempdb-config') {
-            const r = await request.query(`
+            const r = await db.runQuery(`
                 SELECT 
                     f.name AS tempdb_file,
                     f.type_desc,
@@ -530,7 +541,7 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                     END AS growth_setting
                 FROM sys.master_files f
                 WHERE f.database_id = DB_ID('tempdb');
-            `);
+            `, { database: targetDb });
             recordset = r.recordset;
         } else if (categoryId === 'remediation-audit-log' && queryId === 'audit-history') {
             recordset = getAuditLogs();
@@ -544,20 +555,35 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
         const elapsedMs = Date.now() - startTime;
 
         res.json({
+            ok: true,
             success: true,
             elapsedMs,
             recordsets: [recordset]
         });
     } catch (err) {
-        res.status(500).json({
-            success: false,
-            error: err.message
-        });
+        sendDbError(res, logger, db, err, `Failed to run query ${categoryId}/${queryId}`);
     }
 });
 
-// Start Server
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-    console.log(`SQLDB Toolkit backend running on port ${PORT}`);
-});
+    return app;
+}
+
+function startServer(options = {}) {
+    const app = createApp(options);
+    const port = options.port || process.env.PORT || 4000;
+
+    return app.listen(port, () => {
+        console.log(`SQLDB Toolkit backend running on port ${port}`);
+    });
+}
+
+if (require.main === module) {
+    startServer();
+}
+
+module.exports = {
+    createApp,
+    getAuditLogs,
+    logAuditEvent,
+    startServer
+};

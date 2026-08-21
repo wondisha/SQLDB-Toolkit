@@ -92,6 +92,13 @@
       gap: 2px;
     }
 
+    .control-hint {
+      font-size: 10px;
+      color: var(--text-muted);
+      max-width: 220px;
+      line-height: 1.3;
+    }
+
     .control-label {
       font-size: 10px;
       text-transform: uppercase;
@@ -149,6 +156,17 @@
       color: var(--text-muted);
       padding-left: 12px;
       border-left: 1px solid var(--border-color);
+    }
+
+    .connection-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .connection-meta {
+      font-size: 10px;
+      color: var(--text-faint);
     }
 
     .conn-dot {
@@ -486,6 +504,7 @@
         <select id="databaseSelect" style="width: 150px;">
           <option value="">(unavailable)</option>
         </select>
+        <span class="control-hint" id="databaseHint"></span>
       </label>
 
       <!-- Auto-Refresh Selector -->
@@ -504,7 +523,10 @@
 
       <div class="connection-status">
         <div class="conn-dot" id="connDot"></div>
-        <span id="connLabel">connecting…</span>
+        <div class="connection-copy">
+          <span id="connLabel">connecting…</span>
+          <span class="connection-meta" id="connMeta"></span>
+        </div>
       </div>
     </div>
   </header>

@@ -10,6 +10,9 @@ const state = {
   database: null,
   refreshSeconds: 15,
   timers: [],
+  databaseUnavailableReason: '',
+  lastHealthCheckAt: null,
+  lastSuccessfulRefreshAt: null,
 };
 
 const els = {
@@ -18,13 +21,20 @@ const els = {
   serverSelect: document.getElementById('serverSelect'),
   databaseControl: document.getElementById('databaseControl'),
   databaseSelect: document.getElementById('databaseSelect'),
+  databaseHint: document.getElementById('databaseHint'),
   refreshSelect: document.getElementById('refreshSelect'),
   refreshNowBtn: document.getElementById('refreshNowBtn'),
   connDot: document.getElementById('connDot'),
   connLabel: document.getElementById('connLabel'),
+  connMeta: document.getElementById('connMeta'),
 };
 
 let currentChart = null;
+const DB_ERROR_DISPLAY = {
+  AUTH_FAILED: 'Authentication failed. Check DB_USER/DB_PASSWORD.',
+  DB_UNREACHABLE: 'Database server unreachable. Check DB_SERVER/port/service.',
+  TIMEOUT: 'Connection timed out. Verify network/firewall and retry.',
+};
 
 // ---------------------------------------------------------------- bootstrap
 
@@ -49,8 +59,8 @@ async function init() {
     state.database = servers[0].database || servers[0].defaultDatabase || null;
 
     await onServerChanged();
+    await testConnection();
     setActiveCategory(catalog[0].id);
-    testConnection();
   } catch (err) {
     renderFatal(`Could not reach dashboard API at ${API_BASE}. (${err.message})`);
   }
@@ -58,7 +68,7 @@ async function init() {
 
 function renderFatal(message) {
   els.content.innerHTML = `<div class="panel"><div class="panel-error">${escapeHtml(message)}</div></div>`;
-  setConn(false, 'offline');
+  setConn(false, 'Dashboard API unavailable.');
 }
 
 // ---------------------------------------------------------------- top controls
@@ -84,7 +94,7 @@ if (els.serverSelect.tagName === 'INPUT') {
   els.serverSelect.addEventListener('input', async (e) => {
     state.serverId = e.target.value.trim();
     await onServerChanged();
-    testConnection();
+    await testConnection();
     renderActivePanels();
   });
 } else {
@@ -93,7 +103,7 @@ if (els.serverSelect.tagName === 'INPUT') {
     const srv = state.servers.find((s) => s.id === state.serverId);
     state.database = srv ? (srv.database || srv.defaultDatabase) : null;
     await onServerChanged();
-    testConnection();
+    await testConnection();
     renderActivePanels();
   });
 }
@@ -108,40 +118,76 @@ els.refreshSelect.addEventListener('change', () => {
   renderActivePanels();
 });
 
-els.refreshNowBtn.addEventListener('click', () => renderActivePanels());
+els.refreshNowBtn.addEventListener('click', async () => {
+  await onServerChanged();
+  await testConnection();
+  renderActivePanels();
+});
 
 async function onServerChanged() {
   try {
     const dbs = await fetchJSON(`/api/servers/${state.serverId}/databases`);
     state.databases = dbs;
-    els.databaseSelect.innerHTML = dbs
-      .map((d) => `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}</option>`)
-      .join('');
-    if (state.database && dbs.some((d) => d.name === state.database)) {
-      els.databaseSelect.value = state.database;
-    } else if (dbs.length) {
-      state.database = dbs[0].name;
-      els.databaseSelect.value = state.database;
+    state.databaseUnavailableReason = '';
+    if (!state.database || !dbs.some((d) => d.name === state.database)) {
+      state.database = dbs.length ? dbs[0].name : null;
     }
   } catch (err) {
     state.databases = [];
-    els.databaseSelect.innerHTML = '<option value="">(unavailable)</option>';
+    state.databaseUnavailableReason = getDbErrorDisplay(err);
   }
+
+  renderDatabaseSelect();
 }
 
 async function testConnection() {
-  setConn(null, 'connecting…');
+  setConn(null, 'Checking database connection…');
   try {
-    await fetchJSON(`/api/servers/${state.serverId}/test`);
-    setConn(true, `connected — ${state.serverId}`);
+    const health = await fetchJSON('/api/health/db');
+    state.lastHealthCheckAt = health.checkedAt || new Date().toISOString();
+    markLastSuccessfulRefresh(health.checkedAt);
+    setConn(true, `Connected to ${health.server}/${health.database}`);
   } catch (err) {
-    setConn(false, `connection failed: ${err.message}`);
+    state.lastHealthCheckAt = err.checkedAt || new Date().toISOString();
+    setConn(false, getDbErrorDisplay(err), err.code);
   }
 }
 
-function setConn(ok, label) {
+function renderDatabaseSelect() {
+  els.databaseSelect.disabled = state.databases.length === 0;
+
+  if (state.databases.length > 0) {
+    els.databaseSelect.innerHTML = state.databases
+      .map((d) => `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}</option>`)
+      .join('');
+    if (state.database) {
+      els.databaseSelect.value = state.database;
+    }
+    els.databaseSelect.title = '';
+    els.databaseHint.textContent = '';
+    return;
+  }
+
+  const optionValue = state.database || '';
+  const optionLabel = state.database ? `${state.database} (last selected)` : '(unavailable)';
+  els.databaseSelect.innerHTML = `<option value="${escapeHtml(optionValue)}">${escapeHtml(optionLabel)}</option>`;
+  els.databaseSelect.value = optionValue;
+  els.databaseSelect.title = state.databaseUnavailableReason || 'Database list unavailable.';
+  els.databaseHint.textContent = state.databaseUnavailableReason || 'Database list unavailable.';
+}
+
+function markLastSuccessfulRefresh(value) {
+  state.lastSuccessfulRefreshAt = value || new Date().toISOString();
+}
+
+function setConn(ok, label, code) {
   els.connDot.className = 'conn-dot' + (ok === true ? ' ok' : ok === false ? ' err' : '');
   els.connLabel.textContent = label;
+  const meta = [];
+  if (code) meta.push(code);
+  if (state.lastHealthCheckAt) meta.push(`checked ${formatTimestamp(state.lastHealthCheckAt)}`);
+  if (state.lastSuccessfulRefreshAt) meta.push(`last successful refresh ${formatTimestamp(state.lastSuccessfulRefreshAt)}`);
+  els.connMeta.textContent = meta.join(' · ');
 }
 
 // ---------------------------------------------------------------- sidebar
@@ -264,6 +310,7 @@ async function loadPanel(categoryId, q, panelEl) {
 
   try {
     const data = await fetchJSON(`/api/query/${categoryId}/${q.id}?${params.toString()}`);
+    markLastSuccessfulRefresh();
     elapsedEl.textContent = `${data.elapsedMs || 0} ms`;
     bodyEl.innerHTML = '';
 
@@ -457,21 +504,16 @@ async function handleActionClick(action, row) {
   }
 
   try {
-    const res = await fetch(`${API_BASE}${action.endpoint}`, {
+    const result = await fetchJSON(action.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-
-    const result = await res.json();
-    if (res.ok) {
-      alert(result.message || 'Action executed successfully.');
-      renderActivePanels();
-    } else {
-      alert('Action failed: ' + (result.error || result.message || 'Unknown error'));
-    }
+    markLastSuccessfulRefresh();
+    alert(result.message || 'Action executed successfully.');
+    renderActivePanels();
   } catch (err) {
-    alert('Network/Server error: ' + err.message);
+    alert('Action failed: ' + getDbErrorDisplay(err));
   }
 }
 
@@ -587,17 +629,29 @@ function renderBlockingTree(rows) {
 
 // ---------------------------------------------------------------- utils
 
-async function fetchJSON(path) {
-  const res = await fetch(`${API_BASE}${path}`);
+async function fetchJSON(path, options) {
+  const res = await fetch(`${API_BASE}${path}`, options);
+  const body = await res.json().catch(() => null);
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      if (body.error) msg = body.error;
-    } catch (_) {}
-    throw new Error(msg);
+    if (body && (body.message || body.error)) msg = body.message || body.error;
+    const err = new Error(msg);
+    err.code = body && body.code ? body.code : null;
+    err.checkedAt = body && body.checkedAt ? body.checkedAt : null;
+    err.traceId = body && body.traceId ? body.traceId : null;
+    err.details = body && body.details ? body.details : null;
+    throw err;
   }
-  return res.json();
+  return body;
+}
+
+function getDbErrorDisplay(err) {
+  return DB_ERROR_DISPLAY[err && err.code] || err.message || 'Database request failed. Review server logs and retry.';
+}
+
+function formatTimestamp(value) {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
 }
 
 function escapeHtml(v) {
