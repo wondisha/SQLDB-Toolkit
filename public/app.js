@@ -76,8 +76,8 @@ function renderFatal(message) {
 function renderServerSelect() {
   if (els.serverSelect.tagName === 'INPUT') {
     if (state.servers.length > 0 && !els.serverSelect.value) {
-      els.serverSelect.value = servers[0].label || servers[0].name || servers[0].id;
-      state.serverId = servers[0].id;
+      els.serverSelect.value = state.servers[0].label || state.servers[0].name || state.servers[0].id;
+      state.serverId = state.servers[0].id;
     }
   } else {
     els.serverSelect.innerHTML = state.servers
