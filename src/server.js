@@ -79,6 +79,37 @@ function createApp({ db = defaultDb, logger = console } = {}) {
         throw err;
     }
 
+    async function getQueryStoreState(targetDb) {
+        const result = await db.withRequest(
+            (request) =>
+                request.query(`
+                    SELECT
+                        DB_NAME() AS current_db,
+                        desired_state_desc,
+                        actual_state_desc,
+                        readonly_reason
+                    FROM sys.database_query_store_options;
+                `),
+            { database: targetDb }
+        );
+
+        const row = result.recordset[0] || null;
+        if (!row) {
+            return { enabled: false, reason: 'UNKNOWN_STATE' };
+        }
+
+        const actual = (row.actual_state_desc || '').toUpperCase();
+        const enabled = actual === 'READ_WRITE' || actual === 'READ_ONLY';
+
+        return {
+            enabled,
+            currentDb: row.current_db,
+            desiredState: row.desired_state_desc,
+            actualState: row.actual_state_desc,
+            readonlyReason: row.readonly_reason
+        };
+    }
+
     app.use(cors());
     app.use(express.json());
     app.use(express.static(path.join(process.cwd(), 'public')));
@@ -345,6 +376,20 @@ app.post('/api/actions/disable-autoshrink', async (req, res) => {
 app.get('/api/performance/querystore', async (req, res) => {
     try {
         const targetDb = req.query.database || dbConfig.database;
+        const qs = await getQueryStoreState(targetDb);
+
+        if (!qs.enabled) {
+            return res.json({
+                ok: true,
+                success: true,
+                requiresAction: true,
+                action: 'ENABLE_QUERY_STORE',
+                database: targetDb,
+                queryStore: qs,
+                data: []
+            });
+        }
+
         const result = await db.withRequest((request) => request.query(`
             SELECT TOP 20
                 q.query_id,
@@ -363,7 +408,13 @@ app.get('/api/performance/querystore', async (req, res) => {
             ORDER BY total_cpu_ms DESC;
         `), { database: targetDb, inputs: { targetDb } });
 
-        res.json({ ok: true, success: true, data: result.recordset });
+        res.json({
+            ok: true,
+            success: true,
+            requiresAction: false,
+            queryStore: qs,
+            data: result.recordset
+        });
     } catch (err) {
         sendDbError(res, logger, db, err, 'Failed to load Query Store insights');
     }
@@ -381,6 +432,20 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
         let recordset = [];
 
         if (categoryId === 'performance' && (queryId === 'query-store-insights' || queryId === 'querystore')) {
+            const qs = await getQueryStoreState(targetDb);
+
+            if (!qs.enabled) {
+                return res.json({
+                    ok: true,
+                    success: true,
+                    elapsedMs: Date.now() - startTime,
+                    requiresAction: true,
+                    action: 'ENABLE_QUERY_STORE',
+                    queryStore: qs,
+                    recordsets: [[]]
+                });
+            }
+
             const r = await db.withRequest((request) => request.query(`
                 SELECT TOP 20
                     q.query_id,
