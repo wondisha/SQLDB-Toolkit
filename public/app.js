@@ -314,8 +314,10 @@ async function loadPanel(categoryId, q, panelEl) {
     elapsedEl.textContent = `${data.elapsedMs || 0} ms`;
     bodyEl.innerHTML = '';
 
-    const allowActions = data.requiresAction === true;
+    const isQueryStorePanel = categoryId === 'performance' && (q.id === 'query-store-insights' || q.id === 'querystore');
     const firstRows = data.recordsets && data.recordsets[0] ? data.recordsets[0] : [];
+    const allowActions = data.requiresAction === true || (isQueryStorePanel && firstRows.length === 0);
+    
 
     if (q.chartConfig && firstRows.length > 0 && typeof Chart !== 'undefined') {
       renderChart(firstRows, q.chartConfig);
