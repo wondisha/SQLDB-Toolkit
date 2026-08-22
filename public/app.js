@@ -76,8 +76,8 @@ function renderFatal(message) {
 function renderServerSelect() {
   if (els.serverSelect.tagName === 'INPUT') {
     if (state.servers.length > 0 && !els.serverSelect.value) {
-      els.serverSelect.value = state.servers[0].label || state.servers[0].name || state.servers[0].id;
-      state.serverId = state.servers[0].id;
+      els.serverSelect.value = servers[0].label || servers[0].name || servers[0].id;
+      state.serverId = servers[0].id;
     }
   } else {
     els.serverSelect.innerHTML = state.servers
@@ -314,6 +314,7 @@ async function loadPanel(categoryId, q, panelEl) {
     elapsedEl.textContent = `${data.elapsedMs || 0} ms`;
     bodyEl.innerHTML = '';
 
+    const allowActions = data.requiresAction === true;
     const firstRows = data.recordsets && data.recordsets[0] ? data.recordsets[0] : [];
 
     if (q.chartConfig && firstRows.length > 0 && typeof Chart !== 'undefined') {
@@ -321,12 +322,26 @@ async function loadPanel(categoryId, q, panelEl) {
     }
 
     if (data.recordsets) {
-      data.recordsets.forEach((rs) => bodyEl.appendChild(renderRecordset(q, rs)));
+      data.recordsets.forEach((rs) => bodyEl.appendChild(renderRecordset(q, rs, allowActions)));
     } else if (data.rows) {
-      bodyEl.appendChild(renderRecordset(q, data.rows));
+      bodyEl.appendChild(renderRecordset(q, data.rows, allowActions));
     }
 
-    const totalRows = data.recordsets ? data.recordsets.reduce((acc, rs) => acc + rs.length, 0) : (data.rows ? data.rows.length : 0);
+    const totalRows = data.recordsets
+      ? data.recordsets.reduce((acc, rs) => acc + rs.length, 0)
+      : (data.rows ? data.rows.length : 0);
+
+    if (totalRows === 0 && allowActions && q.actions && q.actions.length > 0) {
+      const msg = document.createElement('div');
+      msg.className = 'panel-empty';
+      msg.textContent = 'This panel requires remediation before data can be collected.';
+      bodyEl.appendChild(msg);
+
+      const synthetic = [{ database_name: state.database, status: 'ACTION_REQUIRED' }];
+      bodyEl.appendChild(renderTable(synthetic, q.actions, true));
+      return;
+    }
+
     if (totalRows === 0) {
       bodyEl.innerHTML = '<div class="panel-empty">No rows returned — nothing to report right now.</div>';
     }
@@ -412,7 +427,7 @@ function badgeClassFor(col, value) {
   return 'badge-neutral';
 }
 
-function renderRecordset(queryConfig, rows) {
+function renderRecordset(queryConfig, rows, allowActions = false) {
   if (!rows || rows.length === 0) {
     return document.createElement('div');
   }
@@ -424,10 +439,10 @@ function renderRecordset(queryConfig, rows) {
   if (queryId === 'active-blockers' || queryId === 'current-blocking-chains') {
     return renderBlockingTree(rows);
   }
-  return renderTable(rows, queryConfig.actions);
+  return renderTable(rows, queryConfig.actions, allowActions);
 }
 
-function renderTable(rows, actions) {
+function renderTable(rows, actions, allowActions = false) {
   const cols = Object.keys(rows[0] || {});
   const wrap = document.createElement('div');
   const table = document.createElement('table');
@@ -435,7 +450,7 @@ function renderTable(rows, actions) {
 
   const thead = document.createElement('thead');
   let headHtml = `<tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}`;
-  if (actions && actions.length > 0) headHtml += '<th>Actions</th>';
+  if (allowActions && actions && actions.length > 0) headHtml += '<th>Actions</th>';
   headHtml += '</tr>';
   thead.innerHTML = headHtml;
   table.appendChild(thead);
@@ -443,7 +458,7 @@ function renderTable(rows, actions) {
   const tbody = document.createElement('tbody');
   rows.forEach((row) => {
     const tr = document.createElement('tr');
-    
+
     let rowHtml = cols
       .map((c) => {
         const val = row[c];
@@ -457,21 +472,16 @@ function renderTable(rows, actions) {
 
     tr.innerHTML = rowHtml;
 
-    if (actions && actions.length > 0) {
+    if (allowActions && actions && actions.length > 0) {
       const actionTd = document.createElement('td');
       actionTd.className = 'action-cell';
 
       actions.forEach((action) => {
-        const paramKey = action.paramKeys ? action.paramKeys['sql'] : null;
-        const fixValue = paramKey ? row[paramKey] : true;
-
-        if (fixValue !== null && fixValue !== undefined && fixValue !== '' && fixValue !== '—') {
-          const btn = document.createElement('button');
-          btn.textContent = action.label;
-          btn.className = `btn btn-${action.variant || 'primary'}`;
-          btn.addEventListener('click', () => handleActionClick(action, row));
-          actionTd.appendChild(btn);
-        }
+        const btn = document.createElement('button');
+        btn.textContent = action.label;
+        btn.className = `btn btn-${action.variant || 'primary'}`;
+        btn.addEventListener('click', () => handleActionClick(action, row));
+        actionTd.appendChild(btn);
       });
 
       tr.appendChild(actionTd);
