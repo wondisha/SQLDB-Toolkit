@@ -2,6 +2,9 @@ const sql = require('mssql');
 
 const DEFAULT_CONNECTION_TIMEOUT_MS = 5000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
+const DEFAULT_POOL_MAX_SIZE = 10;
+const DEFAULT_POOL_MIN_SIZE = 0;
+const DEFAULT_POOL_IDLE_TIMEOUT_MS = 30000;
 
 const poolPromises = new Map();
 
@@ -18,6 +21,11 @@ function getDbConfig(env = process.env) {
         password: env.DB_PASSWORD,
         connectionTimeout: readTimeout(env.DB_CONNECTION_TIMEOUT_MS, DEFAULT_CONNECTION_TIMEOUT_MS),
         requestTimeout: readTimeout(env.DB_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS),
+        pool: {
+            max: readTimeout(env.DB_POOL_MAX_SIZE, DEFAULT_POOL_MAX_SIZE),
+            min: readTimeout(env.DB_POOL_MIN_SIZE, DEFAULT_POOL_MIN_SIZE),
+            idleTimeoutMillis: readTimeout(env.DB_POOL_IDLE_TIMEOUT_MS, DEFAULT_POOL_IDLE_TIMEOUT_MS)
+        },
         options: {
             encrypt: env.DB_ENCRYPT === 'true',
             trustServerCertificate: env.DB_TRUST_SERVER_CERTIFICATE !== 'false'
@@ -38,6 +46,8 @@ function getPoolCacheKey(config) {
         database: config.database,
         user: config.user,
         password: config.password,
+        poolMax: config.pool && config.pool.max,
+        poolMin: config.pool && config.pool.min,
         encrypt: config.options && config.options.encrypt,
         trustServerCertificate: config.options && config.options.trustServerCertificate
     });
@@ -84,7 +94,7 @@ async function closePool() {
         try {
             const pool = await activePool;
             await pool.close();
-        } catch (_) {}
+        } catch {}
     }));
 }
 
@@ -173,6 +183,9 @@ async function withRequest(operation, options = {}) {
 
 module.exports = {
     DEFAULT_CONNECTION_TIMEOUT_MS,
+    DEFAULT_POOL_IDLE_TIMEOUT_MS,
+    DEFAULT_POOL_MAX_SIZE,
+    DEFAULT_POOL_MIN_SIZE,
     DEFAULT_REQUEST_TIMEOUT_MS,
     classifyDbError,
     closePool,
