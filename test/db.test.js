@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { classifyDbError } = require('../src/lib/db');
+const { classifyDbError, getDbConfig } = require('../src/lib/db');
 
 test('classifyDbError normalizes auth failures', () => {
     const err = new Error("Login failed for user 'sa'.");
@@ -40,4 +40,18 @@ test('classifyDbError falls back to unknown database errors', () => {
         code: 'UNKNOWN_DB_ERROR',
         message: 'Database request failed. Review server logs and retry.'
     });
+});
+
+test('getDbConfig reads connection pool settings from env', () => {
+    const config = getDbConfig({
+        DB_SERVER: 'localhost',
+        DB_NAME: 'master',
+        DB_POOL_MAX_SIZE: '25',
+        DB_POOL_MIN_SIZE: '2',
+        DB_POOL_IDLE_TIMEOUT_MS: '45000'
+    });
+
+    assert.equal(config.pool.max, 25);
+    assert.equal(config.pool.min, 2);
+    assert.equal(config.pool.idleTimeoutMillis, 45000);
 });

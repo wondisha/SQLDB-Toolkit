@@ -1,12 +1,29 @@
 const crypto = require('crypto');
+const compression = require('compression');
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const defaultDb = require('./lib/db');
+const { createMemoryCache, normalizeTtl } = require('./lib/cache');
 require('dotenv').config();
 
 const auditLogPath = path.join(process.cwd(), 'audit_log.json');
+const CACHEABLE_QUERY_KEYS = new Set([
+    'ag-health/ag-replica-states',
+    'best-practices/compatibility-level',
+    'best-practices/db-configurations',
+    'best-practices/file-growth-config',
+    'best-practices/isolation-levels',
+    'best-practices/tempdb-config',
+    'health-check/backup-history',
+    'health-check/server-uptime',
+    'index-maintenance/index-fragmentation',
+    'performance/query-store-insights',
+    'performance/querystore',
+    'security-audit/orphan-users'
+]);
 
 // Helper to read audit log
 function getAuditLogs() {
@@ -15,7 +32,7 @@ function getAuditLogs() {
             const data = fs.readFileSync(auditLogPath, 'utf8');
             return JSON.parse(data);
         }
-    } catch (e) {}
+    } catch {}
     return [];
 }
 
@@ -30,11 +47,56 @@ function logAuditEvent(actionName, targetDb, details) {
     });
     try {
         fs.writeFileSync(auditLogPath, JSON.stringify(logs, null, 2));
-    } catch (e) {}
+    } catch {}
 }
 
 function createTraceId() {
     return crypto.randomUUID();
+}
+
+function parseCorsOrigin(value) {
+    if (!value) {
+        return true;
+    }
+
+    const origins = String(value)
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+
+    if (origins.length === 0) {
+        return true;
+    }
+
+    return origins.length === 1 ? origins[0] : origins;
+}
+
+function resolveStaticDir() {
+    const builtAssetsDir = path.join(process.cwd(), 'dist');
+    if (fs.existsSync(builtAssetsDir)) {
+        return builtAssetsDir;
+    }
+
+    return path.join(process.cwd(), 'public');
+}
+
+function applyStaticHeaders(res, filePath, maxAgeSeconds) {
+    if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
+        res.setHeader('Cache-Control', `public, max-age=${maxAgeSeconds}, must-revalidate`);
+        return;
+    }
+
+    if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache');
+    }
+}
+
+function getCacheTtlMs(categoryId, queryId, defaultTtlMs) {
+    return CACHEABLE_QUERY_KEYS.has(`${categoryId}/${queryId}`) ? defaultTtlMs : 0;
+}
+
+function shouldBypassCache(req) {
+    return req.query.refresh === '1' || String(req.get('cache-control') || '').toLowerCase().includes('no-cache');
 }
 
 function sendDbError(res, logger, db, err, context, options = {}) {
@@ -60,6 +122,9 @@ function sendDbError(res, logger, db, err, context, options = {}) {
 function createApp({ db = defaultDb, logger = console } = {}) {
     const app = express();
     const dbConfig = db.getDbConfig();
+    const queryCacheTtlMs = normalizeTtl(process.env.QUERY_CACHE_TTL_MS, 15000);
+    const queryCache = createMemoryCache({ defaultTtlMs: queryCacheTtlMs });
+    const staticCacheMaxAgeSeconds = normalizeTtl(process.env.STATIC_CACHE_MAX_AGE_SECONDS, 300);
 
     async function resolveDatabaseName(databaseName) {
         const requestedDatabase = databaseName || dbConfig.database;
@@ -110,9 +175,25 @@ function createApp({ db = defaultDb, logger = console } = {}) {
         };
     }
 
-    app.use(cors());
+    app.use(cors({ origin: parseCorsOrigin(process.env.CORS_ORIGIN) }));
+    app.use('/api', rateLimit({
+        windowMs: normalizeTtl(process.env.RATE_LIMIT_WINDOW_MS, 60000),
+        limit: normalizeTtl(process.env.RATE_LIMIT_MAX, 60),
+        standardHeaders: true,
+        legacyHeaders: false,
+        handler(_req, res) {
+            res.status(429).json({
+                ok: false,
+                code: 'RATE_LIMITED',
+                message: 'Too many requests. Retry after the rate limit window resets.'
+            });
+        }
+    }));
+    app.use(compression());
     app.use(express.json());
-    app.use(express.static(path.join(process.cwd(), 'public')));
+    app.use(express.static(resolveStaticDir(), {
+        setHeaders: (res, filePath) => applyStaticHeaders(res, filePath, staticCacheMaxAgeSeconds)
+    }));
 
 // ==========================================
 // CONFIGURATION & CATALOG ENDPOINTS
@@ -352,6 +433,7 @@ app.post('/api/actions/enable-querystore', async (req, res) => {
     try {
         const targetDb = await resolveDatabaseName(req.body.database || dbConfig.database);
         await db.withRequest((request) => request.query(`ALTER DATABASE ${db.escapeSqlIdentifier(targetDb)} SET QUERY_STORE = ON (OPERATION_MODE = READ_WRITE);`));
+        queryCache.clear();
         logAuditEvent('ENABLE_QUERY_STORE', targetDb, 'Enabled Query Store successfully via dashboard action.');
         res.json({ ok: true, success: true, message: `Query Store successfully enabled on ${targetDb}.` });
     } catch (err) {
@@ -363,6 +445,7 @@ app.post('/api/actions/disable-autoshrink', async (req, res) => {
     try {
         const targetDb = await resolveDatabaseName(req.body.database || dbConfig.database);
         await db.withRequest((request) => request.query(`ALTER DATABASE ${db.escapeSqlIdentifier(targetDb)} SET AUTO_SHRINK OFF;`));
+        queryCache.clear();
         logAuditEvent('DISABLE_AUTO_SHRINK', targetDb, 'Disabled AUTO_SHRINK successfully via dashboard action.');
         res.json({ ok: true, success: true, message: `AUTO_SHRINK disabled on ${targetDb}.` });
     } catch (err) {
@@ -427,6 +510,22 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
     const { categoryId, queryId } = req.params;
     const targetDb = req.query.database || dbConfig.database;
     const startTime = Date.now();
+    const cacheTtlMs = getCacheTtlMs(categoryId, queryId, queryCacheTtlMs);
+    const bypassCache = shouldBypassCache(req);
+    const cacheKey = JSON.stringify({ categoryId, queryId, targetDb });
+
+    if (cacheTtlMs > 0 && !bypassCache) {
+        const cachedResult = queryCache.get(cacheKey);
+        if (cachedResult) {
+            return res.json({
+                ...cachedResult.value,
+                cache: {
+                    status: 'HIT',
+                    ttlMs: cachedResult.ttlMs
+                }
+            });
+        }
+    }
 
     try {
         let recordset = [];
@@ -634,13 +733,35 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
         }
 
         const elapsedMs = Date.now() - startTime;
-
-        res.json({
+        const payload = {
             ok: true,
             success: true,
             elapsedMs,
             recordsets: [recordset]
-        });
+        };
+
+        if (cacheTtlMs > 0 && !bypassCache) {
+            queryCache.set(cacheKey, payload, cacheTtlMs);
+            return res.json({
+                ...payload,
+                cache: {
+                    status: 'MISS',
+                    ttlMs: cacheTtlMs
+                }
+            });
+        }
+
+        if (cacheTtlMs > 0) {
+            return res.json({
+                ...payload,
+                cache: {
+                    status: 'BYPASS',
+                    ttlMs: 0
+                }
+            });
+        }
+
+        res.json(payload);
     } catch (err) {
         sendDbError(res, logger, db, err, `Failed to run query ${categoryId}/${queryId}`);
     }
