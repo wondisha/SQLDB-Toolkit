@@ -1,0 +1,14 @@
+[
+  {
+    "timestamp": "2026-08-28T19:36:19.794Z",
+    "action": "EXECUTE_DDL",
+    "database": "AdventureWorks2025",
+    "details": "CREATE NONCLUSTERED INDEX [IX_SalesOrderHeader_28] ON [AdventureWorks2025].[Sales].[SalesOrderHeader] ([TotalDue]) INCLUDE ([OrderDate], [CustomerID], [Comment]);"
+  },
+  {
+    "timestamp": "2026-08-28T19:35:23.895Z",
+    "action": "EXECUTE_DDL",
+    "database": "AdventureWorksLT",
+    "details": "ALTER INDEX [IX_vProductAndDescription] ON [SalesLT].[vProductAndDescription] REBUILD;"
+  }
+]

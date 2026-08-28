@@ -100,6 +100,11 @@ html, body {
 }
 .control select:focus { outline: 1px solid var(--accent-info); }
 
+/* Added specific style rules for instance select fields to maintain design parity */
+.control select#instance-select {
+  min-width: 160px;
+}
+
 .btn-refresh {
   background: var(--bg-panel-raised);
   border: 1px solid var(--border);

@@ -10,6 +10,7 @@ const state = {
   database: null,
   refreshSeconds: 15,
   timers: [],
+  panelData: new Map() // Cache for instant CSV exports
 };
 
 const els = {
@@ -227,7 +228,10 @@ function renderActivePanels() {
       state.timers.push(timer);
     }
 
-    panelEl.querySelector('.panel-run-btn').addEventListener('click', run);
+    const runBtn = panelEl.querySelector('[data-action="run"]');
+    const exportBtn = panelEl.querySelector('[data-action="export"]');
+    if (runBtn) runBtn.addEventListener('click', run);
+    if (exportBtn) exportBtn.addEventListener('click', () => exportPanelToCsv(q.id, q.label));
   });
 }
 
@@ -241,7 +245,8 @@ function panelShell(q) {
       <div class="panel-meta">
         ${q.requiresPermission ? `<span class="perm-badge">${escapeHtml(q.requiresPermission)}</span>` : ''}
         <span class="elapsed" data-role="elapsed"></span>
-        <button class="panel-run-btn" type="button">run</button>
+        <button class="panel-run-btn" data-action="export" type="button" title="Export as CSV">export csv</button>
+        <button class="panel-run-btn" data-action="run" type="button">run</button>
       </div>
     </div>
     <div class="scope-hint">targeting database: <strong>${escapeHtml(state.database || '(none selected)')}</strong></div>
@@ -267,7 +272,8 @@ async function loadPanel(categoryId, q, panelEl) {
     elapsedEl.textContent = `${data.elapsedMs || 0} ms`;
     bodyEl.innerHTML = '';
 
-    const firstRows = data.recordsets && data.recordsets[0] ? data.recordsets[0] : [];
+    const firstRows = data.recordsets && data.recordsets[0] ? data.recordsets[0] : (data.rows || []);
+    state.panelData.set(q.id, firstRows);
 
     if (q.chartConfig && firstRows.length > 0 && typeof Chart !== 'undefined') {
       renderChart(firstRows, q.chartConfig);
@@ -354,14 +360,15 @@ const STATUS_COLUMNS = new Set([
   'status', 'role_desc', 'connected_state_desc', 'recovery_health_desc',
   'synchronization_health_desc', 'synchronization_state_desc', 'database_state_desc',
   'failover_readiness', 'recommendation', 'db_sync_health', 'state_desc',
+  'backup_health', 'volume_health', 'vlf_health', 'evaluation', 'cache_health'
 ]);
 
 function badgeClassFor(col, value) {
   const v = String(value || '').toUpperCase();
   if (['READY', 'HEALTHY', 'CONNECTED', 'ONLINE', 'SYNCHRONIZED', 'OK'].some((s) => v.includes(s))) return 'badge-ok';
   if (['NOT_READY', 'DISCONNECTED', 'NOT_SYNCHRONIZING', 'CRITICAL', 'SUSPECT', 'RECOVERY_PENDING'].some((s) => v.includes(s))) return 'badge-crit';
-  if (['PARTIALLY_HEALTHY', 'REVERTING', 'CONSIDERUPDATE', 'INITIALIZING', 'RESTORING'].some((s) => v.includes(s))) return 'badge-warn';
-  if (v === 'RUNNING' || v === 'SUSPENDED' || v === 'SLEEPING') return 'badge-info';
+  if (['PARTIALLY_HEALTHY', 'REVERTING', 'CONSIDERUPDATE', 'INITIALIZING', 'RESTORING', 'WARNING'].some((s) => v.includes(s))) return 'badge-warn';
+  if (v === 'RUNNING' || v === 'SUSPENDED' || v === 'SLEEPING' || v.includes('METRIC')) return 'badge-info';
   return 'badge-neutral';
 }
 
@@ -381,14 +388,47 @@ function renderRecordset(queryConfig, rows) {
 }
 
 function renderTable(rows, actions) {
-  const cols = Object.keys(rows[0] || {});
+  // Hide internal technical payload and plan id columns from view
+  const cols = Object.keys(rows[0] || {}).filter((c) => {
+    const key = c.toUpperCase();
+    return !key.includes('SQL_ACTION') && 
+           !key.includes('CREATE_INDEX_DDL') && 
+           !key.includes('REMEDIATION_SQL') &&
+           key !== 'PLAN_ID' &&
+           !key.endsWith('_DDL') &&
+           !key.endsWith('_SQL');
+  });
+
   const wrap = document.createElement('div');
   const table = document.createElement('table');
   table.className = 'data-table';
 
+  // Check if any action button should be rendered in the table
+  const hasExecutableAction = actions && actions.length > 0 && rows.some((row) => {
+    return actions.some((action) => {
+      if (action.isDownload) return Boolean(row.plan_id || row.PLAN_ID);
+
+      const isAutoShrink = (action.label || '').toLowerCase().includes('auto-shrink');
+      const shrinkVal = String(row.IS_AUTO_SHRINK_ON || row.is_auto_shrink_on || '').toLowerCase();
+      if (isAutoShrink && (shrinkVal === 'false' || shrinkVal === '0')) return false;
+
+      let fixVal = null;
+      if (action.paramKeys) {
+        const targetKey = action.paramKeys['sql'] || action.paramKeys['SQL'] || action.paramKeys['spid'] || action.paramKeys['SPID'];
+        if (targetKey) {
+          fixVal = row[targetKey] || row[targetKey.toLowerCase()] || row[targetKey.toUpperCase()];
+        }
+      } else {
+        fixVal = true;
+      }
+
+      return fixVal !== null && fixVal !== undefined && fixVal !== '' && fixVal !== '—';
+    });
+  });
+
   const thead = document.createElement('thead');
   let headHtml = `<tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}`;
-  if (actions && actions.length > 0) headHtml += '<th>Actions</th>';
+  if (hasExecutableAction) headHtml += '<th>Actions</th>';
   headHtml += '</tr>';
   thead.innerHTML = headHtml;
   table.appendChild(thead);
@@ -400,9 +440,22 @@ function renderTable(rows, actions) {
     let rowHtml = cols
       .map((c) => {
         const val = row[c];
-        if (STATUS_COLUMNS.has(c) && val !== null && val !== undefined && val !== '') {
+        if (STATUS_COLUMNS.has(c.toLowerCase()) && val !== null && val !== undefined && val !== '') {
           return `<td><span class="badge ${badgeClassFor(c, val)}">${escapeHtml(val)}</span></td>`;
         }
+
+        if (c.toLowerCase() === 'pct_total_wait') {
+          const pct = Number(val) || 0;
+          return `<td class="num">
+            <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;">
+              <div style="width:70px;background:rgba(255,255,255,0.08);height:6px;border-radius:3px;overflow:hidden;">
+                <div style="width:${Math.min(pct, 100)}%;background:var(--accent-primary);height:100%;"></div>
+              </div>
+              <span>${pct.toFixed(2)}%</span>
+            </div>
+          </td>`;
+        }
+
         const isNum = typeof val === 'number';
         return `<td class="${isNum ? 'num' : ''}">${formatCell(val)}</td>`;
       })
@@ -410,15 +463,33 @@ function renderTable(rows, actions) {
 
     tr.innerHTML = rowHtml;
 
-    if (actions && actions.length > 0) {
+    if (hasExecutableAction) {
       const actionTd = document.createElement('td');
       actionTd.className = 'action-cell';
 
       actions.forEach((action) => {
-        const paramKey = action.paramKeys ? action.paramKeys['sql'] : null;
-        const fixValue = paramKey ? row[paramKey] : true;
+        let shouldRender = false;
 
-        if (fixValue !== null && fixValue !== undefined && fixValue !== '' && fixValue !== '—') {
+        if (action.isDownload) {
+          shouldRender = Boolean(row.plan_id || row.PLAN_ID);
+        } else {
+          const isAutoShrink = (action.label || '').toLowerCase().includes('auto-shrink');
+          const shrinkVal = String(row.IS_AUTO_SHRINK_ON || row.is_auto_shrink_on || '').toLowerCase();
+          if (isAutoShrink && (shrinkVal === 'false' || shrinkVal === '0')) return;
+
+          let fixVal = null;
+          if (action.paramKeys) {
+            const targetKey = action.paramKeys['sql'] || action.paramKeys['SQL'] || action.paramKeys['spid'] || action.paramKeys['SPID'];
+            if (targetKey) {
+              fixVal = row[targetKey] || row[targetKey.toLowerCase()] || row[targetKey.toUpperCase()];
+            }
+          } else {
+            fixVal = true;
+          }
+          shouldRender = (fixVal !== null && fixVal !== undefined && fixVal !== '' && fixVal !== '—');
+        }
+
+        if (shouldRender) {
           const btn = document.createElement('button');
           btn.textContent = action.label;
           btn.className = `btn btn-${action.variant || 'primary'}`;
@@ -439,171 +510,31 @@ function renderTable(rows, actions) {
 }
 
 async function handleActionClick(action, row) {
-  let promptMsg = action.confirmPrompt || 'Are you sure you want to execute this action?';
-
-  Object.keys(row).forEach((key) => {
-    promptMsg = promptMsg.replace(new RegExp(`\\{${key}\\}`, 'g'), row[key]);
-  });
-
-  if (!confirm(promptMsg)) return;
-
-  const payload = { server: state.serverId };
-  if (state.database) payload.database = state.database;
-
-  if (action.paramKeys) {
-    Object.entries(action.paramKeys).forEach(([param, rowKey]) => {
-      payload[param] = row[rowKey];
-    });
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}${action.endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    const result = await res.json();
-    if (res.ok) {
-      alert(result.message || 'Action executed successfully.');
-      renderActivePanels();
-    } else {
-      alert('Action failed: ' + (result.error || result.message || 'Unknown error'));
-    }
-  } catch (err) {
-    alert('Network/Server error: ' + err.message);
-  }
-}
-
-function formatCell(val) {
-  if (val === null || val === undefined) return '<span style="color:var(--text-faint)">—</span>';
-  if (val instanceof Object && val.toISOString) return escapeHtml(new Date(val).toLocaleString());
-  if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(val)) {
-    const d = new Date(val);
-    return escapeHtml(isNaN(d) ? val : d.toLocaleString());
-  }
-  return escapeHtml(String(val));
-}
-
-function waitColor(waitType) {
-  const t = (waitType || '').toUpperCase();
-  if (t.startsWith('LCK_') || t.includes('LATCH')) return 'var(--accent-crit)';
-  if (t.startsWith('PAGEIOLATCH') || t.startsWith('IO_') || t.startsWith('WRITELOG') || t.startsWith('ASYNC_IO')) return 'var(--accent-info)';
-  if (t.startsWith('CXPACKET') || t.startsWith('SOS_SCHEDULER') || t.startsWith('THREADPOOL')) return 'var(--accent-warn)';
-  return 'var(--accent-ok)';
-}
-
-function renderWaitBars(rows) {
-  const max = Math.max(...rows.map((r) => Number(r.pct_total_wait) || 0), 1);
-  const wrap = document.createElement('div');
-  wrap.className = 'waitbar-list';
-  rows.forEach((r) => {
-    const pct = Number(r.pct_total_wait) || 0;
-    const widthPct = Math.max((pct / max) * 100, 2);
-    const row = document.createElement('div');
-    row.className = 'waitbar-row';
-    row.innerHTML = `
-      <span class="waitbar-type" title="${escapeHtml(r.wait_type)}">${escapeHtml(r.wait_type)}</span>
-      <span class="waitbar-track"><span class="waitbar-fill" style="width:${widthPct}%;background:${waitColor(r.wait_type)}"></span></span>
-      <span class="waitbar-pct">${pct.toFixed(1)}%</span>
-    `;
-    wrap.appendChild(row);
-  });
-  return wrap;
-}
-
-function renderBlockingTree(rows) {
-  const bySession = new Map(rows.map((r) => [r.session_id, r]));
-  const childrenOf = new Map();
-  rows.forEach((r) => {
-    if (r.blocking_session_id) {
-      if (!childrenOf.has(r.blocking_session_id)) childrenOf.set(r.blocking_session_id, []);
-      childrenOf.get(r.blocking_session_id).push(r);
-    }
-  });
-
-  const roots = rows.filter((r) => (!r.blocking_session_id || r.blocking_session_id === 0) && childrenOf.has(r.session_id));
-  const rootIds = new Set(roots.map((r) => r.session_id));
-  const orphanBlockers = [...childrenOf.keys()].filter((sid) => !rootIds.has(sid) && !bySession.has(sid));
-
-  const wrap = document.createElement('div');
-  wrap.className = 'blocktree';
-
-  function nodeHtml(r, isRoot) {
-    const meta = [
-      r.database_name ? `db: ${r.database_name}` : null,
-      r.wait_type ? `wait: ${r.wait_type}` : null,
-      r.status ? `status: ${r.status}` : null,
-      r.login_name ? `login: ${r.login_name}` : null,
-    ].filter(Boolean).join(' · ');
-    return `<div class="blocktree-node">
-      <span class="sid">${isRoot ? '⛔' : '↳'} SPID ${escapeHtml(r.session_id)}</span>
-      <span class="meta">${escapeHtml(meta)}</span>
-    </div>`;
-  }
-
-  function renderChain(r, isRoot) {
-    const container = document.createElement('div');
-    container.innerHTML = nodeHtml(r, isRoot);
-    const kids = childrenOf.get(r.session_id) || [];
-    kids.forEach((k) => {
-      const childWrap = document.createElement('div');
-      childWrap.className = 'blocktree-child';
-      childWrap.appendChild(renderChain(k, false));
-      container.appendChild(childWrap);
-    });
-    return container;
-  }
-
-  if (roots.length === 0 && orphanBlockers.length === 0) {
-    wrap.innerHTML = '<div class="panel-empty">No active blocking right now.</div>';
-    return wrap;
-  }
-
-  roots.forEach((r) => {
-    const rootEl = document.createElement('div');
-    rootEl.className = 'blocktree-root';
-    rootEl.appendChild(renderChain(r, true));
-    wrap.appendChild(rootEl);
-  });
-
-  orphanBlockers.forEach((sid) => {
-    const rootEl = document.createElement('div');
-    rootEl.className = 'blocktree-root';
-    const container = document.createElement('div');
-    container.innerHTML = `<div class="blocktree-node"><span class="sid">⛔ SPID ${escapeHtml(sid)}</span><span class="meta">not currently running a request</span></div>`;
-    (childrenOf.get(sid) || []).forEach((k) => {
-      const childWrap = document.createElement('div');
-      childWrap.className = 'blocktree-child';
-      childWrap.appendChild(renderChain(k, false));
-      container.appendChild(childWrap);
-    });
-    rootEl.appendChild(container);
-    wrap.appendChild(rootEl);
-  });
-
-  return wrap;
-}
-
-// ---------------------------------------------------------------- utils
-
-async function fetchJSON(path) {
-  const res = await fetch(`${API_BASE}${path}`);
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
+  if (action.isDownload && action.endpoint.includes('download-plan')) {
+    const planId = row.plan_id || row.PLAN_ID;
+    const queryId = row.query_id || row.QUERY_ID;
     try {
-      const body = await res.json();
-      if (body.error) msg = body.error;
-    } catch (_) {}
-    throw new Error(msg);
+      const res = await fetch(`${API_BASE}${action.endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server: state.serverId, database: state.database, plan_id: planId })
+      });
+      const data = await res.json();
+      if (data.planXml) {
+        const blob = new Blob([data.planXml], { type: 'application/xml' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `Query_${queryId}_Plan_${planId}.sqlplan`;
+        link.click();
+      } else {
+        alert(data.error || 'Execution plan not available in Query Store.');
+      }
+    } catch (e) {
+      alert('Failed to download execution plan: ' + e.message);
+    }
+    return;
   }
-  return res.json();
-}
 
-function escapeHtml(v) {
-  return String(v).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
-init();
+  let promptMsg = action.confirmPrompt || 'Are you sure you want to execute this action?';
+  Object.keys(row).forEach((key) => {
+    promptMsg = promptMsg.replace(new RegExp(`\\{${key}\

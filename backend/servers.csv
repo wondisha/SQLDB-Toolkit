@@ -1,0 +1,4 @@
+id,name,server,database,user,password,encrypt
+sql-dev-01,DEV — SQL 2025 Primary,localhost,AdventureWorks2025,sa,YourDevPassword,false
+sql-stage-01,STAGE — AG Replica,192.168.1.50,master,dba_monitor,YourStagePassword,false
+sql-azure-prod,PROD — Azure SQL,my-prod.database.windows.net,ProdDB,cloud_admin,YourProdPassword,true
