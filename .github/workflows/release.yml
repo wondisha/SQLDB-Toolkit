@@ -1,0 +1,65 @@
+name: Build and Release SQLDB-Toolkit
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build SEA Executable
+        run: npm run build:exe
+
+      - name: Assemble Release Folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "SQLDB-Toolkit-Release" -Force
+          Copy-Item "dist\SQLDB-Toolkit.exe" "SQLDB-Toolkit-Release\"
+          Copy-Item "public" "SQLDB-Toolkit-Release\public" -Recurse -Force
+          
+          if (Test-Path "servers.csv") {
+            Copy-Item "servers.csv" "SQLDB-Toolkit-Release\"
+          } else {
+            Set-Content -Path "SQLDB-Toolkit-Release\servers.csv" -Value "id,name,server,database,user,password,encrypt`nsql-dev-01,DEV - SQL 2025 Primary,localhost,AdventureWorks2025,sa,YourPasswordHere,false"
+          }
+
+          if (Test-Path "README.md") {
+            Copy-Item "README.md" "SQLDB-Toolkit-Release\README.txt"
+          }
+
+          if (Test-Path ".env") {
+            Copy-Item ".env" "SQLDB-Toolkit-Release\"
+          }
+
+      - name: Compress Release Archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "SQLDB-Toolkit-Release\*" -DestinationPath "SQLDB-Toolkit-${{ github.ref_name }}-win-x64.zip"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SQLDB-Toolkit-${{ github.ref_name }}-win-x64.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
