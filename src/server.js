@@ -116,7 +116,7 @@ function getServersList() {
     ];
 }
 
-// ---------------------------------------------------------------- robust connection pool registry
+// ---------------------------------------------------------------- connection pool registry
 const connectionPools = new Map();
 
 async function getPool(serverId) {
@@ -926,24 +926,39 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
             recordset = r.recordset;
 
         // 6. Availability Group Queries
+       // 6. Availability Group Queries
         } else if (categoryId === 'ag-health' && queryId === 'ag-replica-states') {
             const r = await request.query(`
-                SELECT 
-                    ag.name AS ag_name,
-                    ar.replica_server_name,
-                    ars.role_desc,
-                    ars.operational_state_desc,
-                    ars.connected_state_desc,
-                    ars.synchronization_health_desc,
-                    ISNULL(hdrs.synchronization_state_desc, 'N/A') AS synchronization_state_desc,
-                    hdrs.last_sent_time,
-                    hdrs.last_received_time,
-                    hdrs.last_hardened_time,
-                    hdrs.last_redone_time
-                FROM sys.availability_groups ag
-                INNER JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id
-                INNER JOIN sys.dm_hadr_availability_replica_states ars ON ar.replica_id = ars.replica_id
-                LEFT JOIN sys.dm_hadr_database_replica_states hdrs ON ar.replica_id = hdrs.replica_id;
+                IF CAST(SERVERPROPERTY('IsHadrEnabled') AS INT) = 1
+                BEGIN
+                    SELECT 
+                        ISNULL(ag.name, 'N/A') AS ag_name,
+                        ar.replica_server_name,
+                        ars.role_desc,
+                        ars.operational_state_desc,
+                        ars.connected_state_desc,
+                        ars.synchronization_health_desc,
+                        ISNULL(hdrs.synchronization_state_desc, 'N/A') AS synchronization_state_desc,
+                        CONVERT(VARCHAR(19), hdrs.last_sent_time, 120) AS last_sent_time,
+                        CONVERT(VARCHAR(19), hdrs.last_received_time, 120) AS last_received_time,
+                        CONVERT(VARCHAR(19), hdrs.last_hardened_time, 120) AS last_hardened_time,
+                        CONVERT(VARCHAR(19), hdrs.last_redone_time, 120) AS last_redone_time
+                    FROM sys.availability_groups ag
+                    INNER JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id
+                    INNER JOIN sys.dm_hadr_availability_replica_states ars ON ar.replica_id = ars.replica_id
+                    LEFT JOIN sys.dm_hadr_database_replica_states hdrs ON ar.replica_id = hdrs.replica_id;
+                END
+                ELSE
+                BEGIN
+                    SELECT 
+                        '(None - Standalone)' AS ag_name,
+                        CAST(SERVERPROPERTY('ServerName') AS VARCHAR(100)) AS replica_server_name,
+                        'STANDALONE' AS role_desc,
+                        'ONLINE' AS operational_state_desc,
+                        'CONNECTED' AS connected_state_desc,
+                        'HEALTHY' AS synchronization_health_desc,
+                        'STANDALONE_INSTANCE' AS synchronization_state_desc;
+                END
             `);
             recordset = r.recordset;
 
