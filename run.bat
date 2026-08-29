@@ -1,14 +1,17 @@
 @echo off
-title SQLDB Toolkit Launcher
+title SQLDB Toolkit Ops Console
 cd /d "%~dp0"
 
-echo Starting SQLDB Toolkit...
-start "" "SQLDB-Toolkit.exe"
+echo ========================================
+echo  Starting SQLDB Toolkit Backend Service
+echo ========================================
 
-:: Wait 1.5 seconds for the local HTTP server to bind
-timeout /t 2 /nobreak >nul
+start "SQLDB Toolkit Backend" cmd /k "SQLDB-Toolkit.exe"
 
-echo Opening browser...
+echo Waiting for backend server on port 4000...
+timeout /t 3 /nobreak >nul
+
+echo Opening SQLDB Toolkit in browser...
 start http://localhost:4000
 
 exit
