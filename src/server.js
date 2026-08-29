@@ -348,6 +348,21 @@ app.get('/api/catalog', (req, res) => {
                             paramKeys: { spid: "session_id" }
                         }
                     ]
+                },
+                {
+                    id: "deadlock-history",
+                    label: "Recent Deadlock Events (system_health)",
+                    script: "Extended Events Deadlock Audit",
+                    description: "Extracts recent deadlock graphs captured by the default system_health session with direct .xdl file export.",
+                    actions: [
+                        {
+                            label: "Download .xdl Graph",
+                            variant: "danger",
+                            endpoint: "/api/actions/download-deadlock",
+                            isDownload: true,
+                            paramKeys: { event_time: "deadlock_time" }
+                        }
+                    ]
                 }
             ]
         },
@@ -556,6 +571,94 @@ app.post('/api/actions/download-plan', async (req, res) => {
         }
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/actions/download-deadlock', async (req, res) => {
+    const { server, event_time } = req.body;
+    try {
+        const pool = await getPool(server);
+        const request = pool.request();
+        request.input('eventTime', sql.VarChar, event_time);
+
+        const r = await request.query(`
+            WITH DeadlockData AS (
+                SELECT CAST(target_data AS XML) AS target_data
+                FROM sys.dm_xe_session_targets st
+                JOIN sys.dm_xe_sessions s ON s.address = st.event_session_address
+                WHERE s.name = 'system_health' AND st.target_name = 'ring_buffer'
+            )
+            SELECT TOP 1
+                e.event_data.query('data[@name="xml_report"]/value/deadlock') AS deadlock_graph
+            FROM DeadlockData
+            CROSS APPLY target_data.nodes('//RingBufferTarget/event[@name="xml_deadlock_report"]') AS e(event_data)
+            WHERE CONVERT(VARCHAR(19), e.event_data.value('(@timestamp)[1]', 'datetime2'), 120) = @eventTime;
+        `);
+
+        if (r.recordset.length && r.recordset[0].deadlock_graph) {
+            res.json({ success: true, deadlockXml: r.recordset[0].deadlock_graph });
+        } else {
+            res.status(404).json({ error: "Deadlock graph not found or expired from ring buffer." });
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ==========================================
+// DIAGNOSTIC REPORT GENERATOR
+// ==========================================
+app.get('/api/reports/health-summary', async (req, res) => {
+    const server = req.query.server || 'localhost';
+    const database = req.query.database || 'master';
+    try {
+        const pool = await getPool(server);
+        const [uptime, backups, space, waits] = await Promise.all([
+            pool.request().query(`SELECT sqlserver_start_time, @@VERSION AS version FROM sys.dm_os_sys_info;`),
+            pool.request().query(`SELECT TOP 5 database_name, MAX(backup_finish_date) AS last_backup FROM msdb.dbo.backupset GROUP BY database_name;`),
+            pool.request().query(`SELECT DISTINCT vs.volume_mount_point, CAST(vs.available_bytes/1073741824.0 AS DECIMAL(10,2)) AS free_gb FROM sys.master_files f CROSS APPLY sys.dm_os_volume_stats(f.database_id, f.file_id) vs;`),
+            pool.request().query(`SELECT TOP 5 wait_type, wait_time_ms FROM sys.dm_os_wait_stats WHERE wait_time_ms > 0 ORDER BY wait_time_ms DESC;`)
+        ]);
+
+        const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>SQLDB Diagnostic Report - ${server}</title>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 32px; }
+                h1 { color: #38bdf8; border-bottom: 2px solid #1e293b; padding-bottom: 12px; }
+                h3 { color: #94a3b8; margin-top: 24px; }
+                table { width: 100%; border-collapse: collapse; margin-bottom: 24px; background: #1e293b; border-radius: 6px; overflow: hidden; }
+                th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #334155; }
+                th { background: #0f172a; color: #94a3b8; font-size: 12px; text-transform: uppercase; }
+            </style>
+        </head>
+        <body>
+            <h1>SQL Server Health Audit: ${server}</h1>
+            <p><strong>Generated:</strong> ${new Date().toUTCString()} | <strong>Target DB:</strong> ${database}</p>
+            <h3>Instance Overview</h3>
+            <p><strong>Version:</strong> ${uptime.recordset[0]?.version || 'N/A'}</p>
+            <p><strong>Start Time:</strong> ${uptime.recordset[0]?.sqlserver_start_time || 'N/A'}</p>
+            <h3>Storage Volumes</h3>
+            <table>
+                <thead><tr><th>Mount Point</th><th>Free Space</th></tr></thead>
+                <tbody>${space.recordset.map(s => `<tr><td>${s.volume_mount_point}</td><td>${s.free_gb} GB Free</td></tr>`).join('')}</tbody>
+            </table>
+            <h3>Top Wait Contention</h3>
+            <table>
+                <thead><tr><th>Wait Type</th><th>Wait Time (ms)</th></tr></thead>
+                <tbody>${waits.recordset.map(w => `<tr><td>${w.wait_type}</td><td>${w.wait_time_ms} ms</td></tr>`).join('')}</tbody>
+            </table>
+        </body>
+        </html>`;
+
+        res.setHeader('Content-Type', 'text/html');
+        res.setHeader('Content-Disposition', `attachment; filename=SQL_Health_Report_${server}_${Date.now()}.html`);
+        res.send(html);
+    } catch (err) {
+        res.status(500).send(`Failed to generate report: ${err.message}`);
     }
 });
 
@@ -848,6 +951,24 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                 ORDER BY r.total_elapsed_time DESC;
             `);
             recordset = r.recordset;
+        } else if (categoryId === 'blocking-deadlocks' && queryId === 'deadlock-history') {
+            const r = await request.query(`
+                WITH DeadlockData AS (
+                    SELECT 
+                        CAST(target_data AS XML) AS target_data
+                    FROM sys.dm_xe_session_targets st
+                    JOIN sys.dm_xe_sessions s ON s.address = st.event_session_address
+                    WHERE s.name = 'system_health' AND st.target_name = 'ring_buffer'
+                )
+                SELECT TOP 10
+                    CONVERT(VARCHAR(19), e.event_data.value('(@timestamp)[1]', 'datetime2'), 120) AS deadlock_time,
+                    ISNULL(e.event_data.value('(data[@name="database_name"]/value)[1]', 'VARCHAR(128)'), @targetDb) AS database_name,
+                    'DEADLOCK DETECTED' AS status
+                FROM DeadlockData
+                CROSS APPLY target_data.nodes('//RingBufferTarget/event[@name="xml_deadlock_report"]') AS e(event_data)
+                ORDER BY deadlock_time DESC;
+            `);
+            recordset = r.recordset;
 
         // 5. Storage & VLF Health Queries
         } else if (categoryId === 'storage-vlf' && queryId === 'vlf-health') {
@@ -926,7 +1047,6 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
             recordset = r.recordset;
 
         // 6. Availability Group Queries
-       // 6. Availability Group Queries
         } else if (categoryId === 'ag-health' && queryId === 'ag-replica-states') {
             const r = await request.query(`
                 IF CAST(SERVERPROPERTY('IsHadrEnabled') AS INT) = 1
