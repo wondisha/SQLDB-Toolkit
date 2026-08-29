@@ -1,0 +1,5 @@
+
+
+id,name,server,database,auth,encrypt
+local-dev,Local Instance,localhost,AdventureWorks2025,windows,false
+corp-sql,Production Cluster,sqlprod01.corp.local,MainDB,windows,true
