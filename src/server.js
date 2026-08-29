@@ -29,9 +29,6 @@ const jsonConfigPath = path.join(process.cwd(), 'servers.json');
 
 // ---------------------------------------------------------------- helpers & security utilities
 
-/**
- * Escapes database identifiers safely against injection (mimics QUOTENAME)
- */
 function quoteIdentifier(identifier) {
     if (!identifier || typeof identifier !== 'string') {
         throw new Error('Invalid database identifier.');
@@ -39,9 +36,6 @@ function quoteIdentifier(identifier) {
     return `[${identifier.replace(/]/g, ']]')}]`;
 }
 
-/**
- * Non-blocking, atomic audit event logger
- */
 async function getAuditLogs() {
     try {
         const data = await fsPromises.readFile(auditLogPath, 'utf8');
@@ -243,6 +237,18 @@ app.get('/api/catalog', (req, res) => {
                     description: "Surfaces active resource bottlenecks (CPU, Disk I/O, Lock Contention, Network)."
                 },
                 {
+                    id: "query-store-waits",
+                    label: "Query Store Top Wait Statistics (24h)",
+                    script: "Query Store Waits",
+                    description: "Aggregates top wait categories and impact across all Query Store queries.",
+                    chartConfig: {
+                        type: "bar",
+                        nameKey: "wait_category_desc",
+                        dataKey: "total_wait_ms",
+                        label: "Total Wait Time (ms)"
+                    }
+                },
+                {
                     id: "memory-buffer-health",
                     label: "Buffer Pool & PLE Memory Health",
                     script: "Memory Subsystem",
@@ -293,7 +299,7 @@ app.get('/api/catalog', (req, res) => {
                 },
                 {
                     id: "index-fragmentation",
-                    label: "High Fragmentation Indexes",
+                    label: "High Fragmentation Indexes (>10%)",
                     script: "Index Health",
                     description: "Scans physical fragmentation levels across database indexes with Rebuild/Reorganize actions.",
                     actions: [
@@ -383,9 +389,9 @@ app.get('/api/catalog', (req, res) => {
             queries: [
                 {
                     id: "ag-replica-states",
-                    label: "Availability Group Replica Status",
-                    script: "AG Health",
-                    description: "Monitors synchronization and connectivity state of Availability Group replicas."
+                    label: "Availability Group Replica Status & Sync Health",
+                    script: "sys.dm_hadr_replica_states",
+                    description: "Monitors synchronization, operational states, and commit timestamps for Availability Groups."
                 }
             ]
         },
@@ -462,7 +468,6 @@ app.post('/api/actions/execute-ddl', async (req, res) => {
         return res.status(400).json({ error: "No valid DDL statement supplied." });
     }
 
-    // Safety validation: only allow index maintenance, create index, or alter index statements
     const cleanSql = ddlSql.trim().toUpperCase();
     const isAllowed = cleanSql.startsWith('CREATE NONCLUSTERED INDEX') || 
                       cleanSql.startsWith('CREATE INDEX') || 
@@ -472,7 +477,6 @@ app.post('/api/actions/execute-ddl', async (req, res) => {
         return res.status(403).json({ error: "Statement rejected: only verified index maintenance commands are allowed." });
     }
 
-    let transaction;
     try {
         const pool = await getPool(server);
         const request = pool.request();
@@ -481,7 +485,6 @@ app.post('/api/actions/execute-ddl', async (req, res) => {
             await request.query(`USE ${quoteIdentifier(database)};`);
         }
 
-        // Set execution timeout to 120 seconds
         request.timeout = 120000;
         await request.query(ddlSql);
 
@@ -671,10 +674,27 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
                 WHERE rn <= 15;
             `);
             recordset = r.recordset;
+        } else if (categoryId === 'performance' && queryId === 'query-store-waits') {
+            const r = await request.query(`
+                SELECT TOP 10
+                    ws.wait_category_desc,
+                    SUM(ws.total_query_wait_time_ms) / 1000.0 AS total_wait_s,
+                    SUM(ws.total_query_wait_time_ms) AS total_wait_ms,
+                    AVG(ws.avg_query_wait_time_ms) AS avg_wait_ms,
+                    COUNT(DISTINCT q.query_id) AS distinct_queries
+                FROM sys.query_store_wait_stats ws
+                JOIN sys.query_store_plan p ON ws.plan_id = p.plan_id
+                JOIN sys.query_store_query q ON p.query_id = q.query_id
+                JOIN sys.query_store_runtime_stats_interval rsi ON ws.runtime_stats_interval_id = rsi.runtime_stats_interval_id
+                WHERE rsi.start_time >= DATEADD(HOUR, -24, GETUTCDATE())
+                GROUP BY ws.wait_category_desc
+                ORDER BY total_wait_ms DESC;
+            `);
+            recordset = r.recordset;
         } else if (categoryId === 'performance' && queryId === 'memory-buffer-health') {
             const r = await request.query(`
                 SELECT 
-                    counter_name,
+                    counter_name, 
                     cntr_value AS raw_value,
                     CASE 
                         WHEN counter_name = 'Page life expectancy' AND cntr_value < 300 THEN 'CRITICAL: Severe Buffer Pool Pressure (< 300s)'
@@ -909,9 +929,21 @@ app.get('/api/query/:categoryId/:queryId', async (req, res) => {
         } else if (categoryId === 'ag-health' && queryId === 'ag-replica-states') {
             const r = await request.query(`
                 SELECT 
-                    ar.replica_server_name, ars.role_desc, ars.operational_state_desc, ars.synchronization_health_desc
-                FROM sys.dm_hadr_availability_replica_states ars
-                JOIN sys.availability_replicas ar ON ars.replica_id = ar.replica_id;
+                    ag.name AS ag_name,
+                    ar.replica_server_name,
+                    ars.role_desc,
+                    ars.operational_state_desc,
+                    ars.connected_state_desc,
+                    ars.synchronization_health_desc,
+                    ISNULL(hdrs.synchronization_state_desc, 'N/A') AS synchronization_state_desc,
+                    hdrs.last_sent_time,
+                    hdrs.last_received_time,
+                    hdrs.last_hardened_time,
+                    hdrs.last_redone_time
+                FROM sys.availability_groups ag
+                INNER JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id
+                INNER JOIN sys.dm_hadr_availability_replica_states ars ON ar.replica_id = ars.replica_id
+                LEFT JOIN sys.dm_hadr_database_replica_states hdrs ON ar.replica_id = hdrs.replica_id;
             `);
             recordset = r.recordset;
 

@@ -27,6 +27,54 @@ const els = {
 
 let currentChart = null;
 
+// ---------------------------------------------------------------- helpers
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function formatCell(val) {
+  if (val === null || val === undefined) return '<span class="cell-null">—</span>';
+  if (typeof val === 'boolean') return val ? 'true' : 'false';
+  if (typeof val === 'number') return Number.isInteger(val) ? val.toLocaleString() : val.toFixed(2);
+  return escapeHtml(val);
+}
+
+async function fetchJSON(url, opts = {}) {
+  const res = await fetch(`${API_BASE}${url}`, opts);
+  if (!res.ok) {
+    let errBody;
+    try { errBody = await res.json(); } catch (_) {}
+    throw new Error((errBody && errBody.error) || `HTTP ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+function exportPanelToCsv(queryId, label) {
+  const rows = state.panelData.get(queryId);
+  if (!rows || rows.length === 0) {
+    alert('No data available to export.');
+    return;
+  }
+  const headers = Object.keys(rows[0]);
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(r => headers.map(h => `"${String(r[h] ?? '').replace(/"/g, '""')}"`).join(','))
+  ].join('\r\n');
+
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `${label.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_export.csv`;
+  link.click();
+}
+
 // ---------------------------------------------------------------- bootstrap
 
 async function init() {
@@ -39,7 +87,7 @@ async function init() {
     state.servers = servers;
 
     if (servers.length === 0) {
-      renderFatal('No servers configured.');
+      renderFatal('No servers configured in servers.csv.');
       return;
     }
 
@@ -376,19 +424,10 @@ function renderRecordset(queryConfig, rows) {
   if (!rows || rows.length === 0) {
     return document.createElement('div');
   }
-
-  const queryId = queryConfig.id;
-  if (queryId === 'wait-profile' || queryId === 'wait-stats-snapshot') {
-    return renderWaitBars(rows);
-  }
-  if (queryId === 'active-blockers' || queryId === 'current-blocking-chains') {
-    return renderBlockingTree(rows);
-  }
   return renderTable(rows, queryConfig.actions);
 }
 
 function renderTable(rows, actions) {
-  // Hide internal technical payload and plan id columns from view
   const cols = Object.keys(rows[0] || {}).filter((c) => {
     const key = c.toUpperCase();
     return !key.includes('SQL_ACTION') && 
@@ -403,7 +442,6 @@ function renderTable(rows, actions) {
   const table = document.createElement('table');
   table.className = 'data-table';
 
-  // Check if any action button should be rendered in the table
   const hasExecutableAction = actions && actions.length > 0 && rows.some((row) => {
     return actions.some((action) => {
       if (action.isDownload) return Boolean(row.plan_id || row.PLAN_ID);
@@ -444,7 +482,7 @@ function renderTable(rows, actions) {
           return `<td><span class="badge ${badgeClassFor(c, val)}">${escapeHtml(val)}</span></td>`;
         }
 
-        if (c.toLowerCase() === 'pct_total_wait') {
+        if (c.toLowerCase() === 'pct_total_wait' || c.toLowerCase() === 'frag_pct' || c.toLowerCase() === 'avg_fragmentation_in_percent') {
           const pct = Number(val) || 0;
           return `<td class="num">
             <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;">
@@ -537,4 +575,32 @@ async function handleActionClick(action, row) {
 
   let promptMsg = action.confirmPrompt || 'Are you sure you want to execute this action?';
   Object.keys(row).forEach((key) => {
-    promptMsg = promptMsg.replace(new RegExp(`\\{${key}\
+    promptMsg = promptMsg.replace(new RegExp(`\\{${key}\\}`, 'gi'), row[key] ?? '');
+  });
+
+  if (!confirm(promptMsg)) return;
+
+  try {
+    const payload = { server: state.serverId, database: state.database };
+    if (action.paramKeys) {
+      Object.keys(action.paramKeys).forEach((p) => {
+        const rowCol = action.paramKeys[p];
+        payload[p] = row[rowCol] ?? row[rowCol.toLowerCase()] ?? row[rowCol.toUpperCase()];
+      });
+    }
+
+    const res = await fetchJSON(action.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    alert(res.message || 'Action executed successfully.');
+    renderActivePanels();
+  } catch (err) {
+    alert(`Action failed: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------- run on load
+init();
