@@ -37,10 +37,14 @@ jobs:
           Copy-Item "dist\SQLDB-Toolkit.exe" "SQLDB-Toolkit-Release\"
           Copy-Item "public" "SQLDB-Toolkit-Release\public" -Recurse -Force
           
+          if (Test-Path "run.bat") {
+            Copy-Item "run.bat" "SQLDB-Toolkit-Release\"
+          }
+
           if (Test-Path "servers.csv") {
             Copy-Item "servers.csv" "SQLDB-Toolkit-Release\"
           } else {
-            Set-Content -Path "SQLDB-Toolkit-Release\servers.csv" -Value "id,name,server,database,user,password,encrypt`nsql-dev-01,DEV - SQL 2025 Primary,localhost,AdventureWorks2025,sa,YourPasswordHere,false"
+            Set-Content -Path "SQLDB-Toolkit-Release\servers.csv" -Value "id,name,server,database,auth,encrypt`nlocal-dev,Local Instance,localhost,AdventureWorks2025,windows,false"
           }
 
           if (Test-Path "README.md") {
@@ -65,5 +69,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
